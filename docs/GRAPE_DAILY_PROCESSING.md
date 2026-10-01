@@ -14,21 +14,16 @@ The GRAPE daily processing is managed by a systemd timer that runs at 01:00 UTC 
 # Copy service and timer files
 sudo cp systemd/grape-daily.service /etc/systemd/system/
 sudo cp systemd/grape-daily.timer /etc/systemd/system/
-sudo cp systemd/grape-upload-retry.service /etc/systemd/system/
-sudo cp systemd/grape-upload-retry.timer /etc/systemd/system/
 
 # Reload systemd
 sudo systemctl daemon-reload
 
-# Enable and start the timers
+# Enable and start the timer
 sudo systemctl enable --now grape-daily.timer
-sudo systemctl enable --now grape-upload-retry.timer
 ```
 
-In addition to the daily run, a second timer `grape-upload-retry.timer`
-(`OnBootSec=5min`, `OnUnitActiveSec=30min`) periodically runs
-`grape upload --resume` to drain any datasets queued for retry by a failed or
-unverified upload.
+There is no upload timer: hs-uploader.service ships the packaged datasets and
+retries on its own.
 
 ### Management
 
@@ -47,10 +42,6 @@ sudo systemctl start grape-daily.service
 
 # Disable the timer
 sudo systemctl disable --now grape-daily.timer
-
-# Inspect the upload-retry timer (runs `grape upload --resume`)
-systemctl status grape-upload-retry.timer
-journalctl -u grape-upload-retry.service -n 100
 ```
 
 ## What It Does
@@ -70,37 +61,25 @@ The daily job processes **yesterday's data** through the following pipeline:
    - Full-window validity masking: any NFFT=512 window overlapping a gap is NaN-masked
    - Outputs to `/var/lib/timestd/products/{CHANNEL}/spectrograms/`
 
-3. **Package** (optional) - Package as Digital RF
-   - Creates DRF packages for PSWS upload
+3. **Package** - Package as Digital RF
+   - Creates DRF packages for PSWS
    - Outputs to `upload/{YYYYMMDD}/{CALLSIGN}_{GRID}/{RECEIVER}@{ID}/OBS.../ch0/`
 
-4. **Upload** (optional) - Upload to PSWS repository
-   - Uploads packaged data via SFTP
+The job uploads nothing.  hs-uploader's `grape-psws` pipeline picks the `OBS*`
+datasets up from `upload/` and ships them to PSWS.
 
 ## Upload Behavior
 
-Upload failures are **non-fatal** — stages 1-3 (decimate, spectrogram, package) always complete and the data is preserved on disk. If the upload fails (e.g., SSH key not yet registered with PSWS), the dataset is queued for retry. Upload the backlog later with:
+hs-uploader owns delivery, so packaging never waits on PSWS.  If the machine's
+key is not yet registered with PSWS, the datasets simply wait in `upload/` and
+ship once the portal accepts it.  `grape daily --no-upload` still parses but
+changes nothing.
 
 ```bash
-sudo -u timestd /opt/hf-timestd/venv/bin/hamsci-physics grape upload --date YYYYMMDD
+hamsci-physics grape status     # cursor, pending datasets, recent outcomes
+smd psws verify                 # prove the SFTP login with the machine's key
+journalctl -u hs-uploader -f    # watch it ship
 ```
-
-To skip the upload stage entirely (e.g., while waiting for PSWS key registration):
-
-```bash
-sudo -u timestd /opt/hf-timestd/venv/bin/hamsci-physics grape daily --no-upload
-```
-
-### Upload verification
-
-Before an upload is marked complete (and cleanup allowed), the uploader walks
-the dataset and requests an sftp `ls -l` of each leaf file, confirming the
-remote byte sizes match and that the trigger directory is present. If
-verification fails, the dataset is re-queued for retry rather than deleted, so
-nothing is lost on a partial or corrupted transfer.
-
-> Background: the `ls -l` parser was hardened in 8f02d48 to tolerate a `?`
-> nlink field returned by the PSWS server.
 
 ## Configuration
 
@@ -162,45 +141,21 @@ hamsci-physics grape decimate --all-channels --date 2026-01-02
 # Generate spectrogram
 hamsci-physics grape spectrogram --channel "SHARED 10000" --date 2026-01-02
 
-# Package for upload
+# Package for upload (hs-uploader ships it)
 hamsci-physics grape package --date 2026-01-02 --callsign AC0G --grid EM28
-
-# Upload
-hamsci-physics grape upload --date 2026-01-02 --dry-run
 ```
 
 ## Preflight Check
 
-Before relying on automated uploads, verify PSWS connectivity with the built-in preflight test:
+Before relying on uploads, prove the PSWS login with the machine's key:
 
 ```bash
-# Run as timestd user (the service user that owns the SSH key)
-sudo -u timestd /opt/hf-timestd/venv/bin/hamsci-physics grape test-upload
+smd psws verify
 ```
 
-This performs three checks:
-1. **TCP connectivity** — can we reach `pswsnetwork.eng.ua.edu:22`?
-2. **SSH key** — does the configured key file exist with correct permissions?
-3. **SFTP autologin** — can we authenticate and connect without a password?
-
-Example output (all checks passing):
-```
-PSWS Upload Preflight Check
-  Host:    pswsnetwork.eng.ua.edu
-  User:    S000171
-  SSH key: /home/timestd/.ssh/id_rsa_psws
-
-[1/3] TCP connectivity to pswsnetwork.eng.ua.edu:22 ... OK (0.1s)
-[2/3] SSH key at /home/timestd/.ssh/id_rsa_psws ... OK
-      Public key: ssh-rsa AAAAB3NzaC1yc2EAAA...
-[3/3] SFTP autologin as S000171@pswsnetwork.eng.ua.edu ... OK (1.0s)
-
-All checks passed — PSWS upload should work.
-```
-
-The command reads host, user, and SSH key path from `/etc/hamsci-physics/config.toml` (sections `[station]` and `[uploader.sftp]`). Use `--config` to specify an alternate config file.
-
-Run this on every new installation before enabling `grape-daily.timer`.
+It tests TCP reach to `pswsnetwork.eng.ua.edu:22`, then an SFTP login as the
+station id with `/etc/hs-uploader/keys/id_ed25519_host`, the one key hs-uploader
+uses (create and register it with `smd psws enroll`).
 
 ## Troubleshooting
 

@@ -7,6 +7,7 @@ contract, and they are what this module pins.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -100,7 +101,16 @@ def test_missing_config_is_a_validate_failure_not_a_crash(tmp_path):
 
 
 @pytest.mark.parametrize("sub", ["daily", "decimate", "spectrogram",
-                                 "package", "upload", "test-upload", "status"])
+                                 "package", "status"])
 def test_grape_subcommands_are_present(sub):
     out = run("grape", "--help", expect=0).stdout
     assert sub in out
+
+
+def test_no_grape_upload_commands_remain():
+    """hs-uploader is the only uploader.  `grape upload` only refused (and
+    listed what `grape status` lists); `grape test-upload` probed with a key
+    no upload uses, where `smd psws verify` probes with the machine's key."""
+    out = run("grape", "--help", expect=0).stdout
+    choices = re.search(r"\{([^}]*)\}", out).group(1).split(",")
+    assert "upload" not in choices and "test-upload" not in choices, choices

@@ -79,30 +79,7 @@ class TestStationId:
         assert psws_identity.instrument_id(LEGACY_CONFIG) == "171"
 
 
-class TestSshKey:
-    def test_legacy_uploader_sftp_ssh_key(self):
-        assert (psws_identity.ssh_key(LEGACY_CONFIG)
-                == "/home/timestd/.ssh/id_rsa_psws")
-
-    def test_split_uploader_ssh_key_file(self):
-        cfg = {"uploader": {"ssh_key_file": "/home/timestd/.ssh/id_rsa_psws"}}
-        assert (psws_identity.ssh_key(cfg)
-                == "/home/timestd/.ssh/id_rsa_psws")
-
-    def test_falls_back_to_the_timestd_readable_key(self):
-        """NOT hs_uploader's default, which is 0600 root:hsupload."""
-        assert (psws_identity.ssh_key(SPLIT_CONFIG)
-                == psws_identity.DEFAULT_SSH_KEY)
-        assert psws_identity.DEFAULT_SSH_KEY.startswith("/home/timestd/")
-
-    def test_expands_tilde(self, monkeypatch):
-        monkeypatch.setenv("HOME", "/home/timestd")
-        cfg = {"uploader": {"ssh_key_file": "~/.ssh/id_rsa_psws"}}
-        assert (psws_identity.ssh_key(cfg)
-                == "/home/timestd/.ssh/id_rsa_psws")
-
-
-class TestHostAndBandwidth:
+class TestHost:
     def test_host_default(self):
         assert psws_identity.sftp_host({}) == "pswsnetwork.eng.ua.edu"
 
@@ -112,21 +89,17 @@ class TestHostAndBandwidth:
         assert psws_identity.sftp_host(
             {"uploader": {"sftp": {"host": "h2"}}}) == "h2"
 
-    def test_zero_bandwidth_means_uncapped(self):
-        assert psws_identity.bandwidth_limit_kbps(LEGACY_CONFIG) is None
-        assert psws_identity.bandwidth_limit_kbps({}) is None
-
-    def test_bandwidth_cap_is_read(self):
-        assert psws_identity.bandwidth_limit_kbps(
-            {"uploader": {"bandwidth_limit_kbps": 100}}) == 100
-
-    def test_garbage_bandwidth_is_ignored_not_fatal(self):
-        assert psws_identity.bandwidth_limit_kbps(
-            {"uploader": {"bandwidth_limit_kbps": "fast"}}) is None
-
 
 def test_the_config_that_actually_broke_production_now_resolves():
     """Verbatim [station] block from B4's /etc/hamsci-physics/config.toml."""
     assert psws_identity.station_id(SPLIT_CONFIG) == "S000170"
     assert psws_identity.instrument_id(SPLIT_CONFIG) == "171"
-    assert psws_identity.ssh_key(SPLIT_CONFIG)
+
+
+def test_no_key_or_bandwidth_resolution_remains():
+    """hs-uploader uploads GRAPE with the machine's one PSWS key
+    (/etc/hs-uploader/keys/id_ed25519_host, mjh 2026-10-01) and its own
+    transport settings.  The in-process path these served is gone, and its
+    default key (/home/timestd/.ssh/id_rsa_psws) was the wrong one."""
+    for gone in ("ssh_key", "bandwidth_limit_kbps", "DEFAULT_SSH_KEY"):
+        assert not hasattr(psws_identity, gone), gone

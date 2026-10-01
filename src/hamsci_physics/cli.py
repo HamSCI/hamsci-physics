@@ -205,7 +205,7 @@ def build_parser() -> argparse.ArgumentParser:
     grape_subparsers = grape_parser.add_subparsers(dest='grape_command', help='GRAPE command')
     
     # GRAPE daily (full orchestrated pipeline)
-    grape_daily_parser = grape_subparsers.add_parser('daily', help='Run full daily pipeline: decimate → spectrogram → package → upload')
+    grape_daily_parser = grape_subparsers.add_parser('daily', help='Run full daily pipeline: decimate → spectrogram → package (hs-uploader ships it)')
     grape_daily_parser.add_argument('--data-root', default='/var/lib/timestd', help='Data root directory')
     grape_daily_parser.add_argument('--config', '-c', default=DEFAULT_CONFIG, help='Config file')
     grape_daily_parser.add_argument('--date', help='Date (YYYY-MM-DD or YYYYMMDD, default: yesterday)')
@@ -237,24 +237,6 @@ def build_parser() -> argparse.ArgumentParser:
     grape_package_parser.add_argument('--grid', required=True, help='Grid square')
     grape_package_parser.add_argument('--debug', '-d', action='store_true', help='Enable DEBUG logging')
     
-    # GRAPE upload
-    grape_upload_parser = grape_subparsers.add_parser('upload', help='Upload to PSWS repository')
-    grape_upload_parser.add_argument('--data-root', default='/var/lib/timestd', help='Data root directory')
-    grape_upload_parser.add_argument('--date', help='Date to upload (default: yesterday)')
-    grape_upload_parser.add_argument('--resume', action='store_true',
-                                     help="Drain every undelivered date directory under "
-                                          "<data-root>/upload/ and reset failed-status tasks "
-                                          "back to pending.  Used by grape-upload-retry.timer; "
-                                          "ignores --date.  Exits 0 even when there is nothing "
-                                          "to do, so the timer no-ops cleanly.")
-    grape_upload_parser.add_argument('--dry-run', action='store_true', help='Show what would be uploaded')
-    grape_upload_parser.add_argument('--debug', '-d', action='store_true', help='Enable DEBUG logging')
-    
-    # GRAPE test-upload (preflight connectivity check)
-    grape_test_upload_parser = grape_subparsers.add_parser('test-upload', help='Test PSWS SFTP connectivity and SSH key')
-    grape_test_upload_parser.add_argument('--config', '-c', default=DEFAULT_CONFIG, help='Config file')
-    grape_test_upload_parser.add_argument('--debug', '-d', action='store_true', help='Enable DEBUG logging')
-
     # GRAPE status
     grape_status_parser = grape_subparsers.add_parser('status', help='Show upload status and history')
     grape_status_parser.add_argument('--data-root', default='/var/lib/timestd', help='Data root directory')
@@ -682,57 +664,6 @@ def main():
             )
             packager.package_day(date_str)
             
-        elif args.grape_command == 'upload':
-            # hs-uploader.service is the single outbound path (2026-08-26).
-            # This command used to drain the spool in-process, which meant a
-            # second writer to the daemon's watermark store under a different
-            # user -- the exact configuration SqliteWatermarkStore's docstring
-            # calls "an operator config error".  --dry-run still answers "what
-            # is still waiting?", as a pure read-only observer.
-            from .grape.spool import pending_datasets, shipped_cursor_ns
-            try:
-                from hs_uploader.watermark.sqlite import default_path
-                _db = default_path()
-            except Exception:
-                _db = Path('/var/lib/hs-uploader/watermarks.db')
-
-            upload_root = data_root / 'upload'
-            if args.dry_run:
-                cursor = shipped_cursor_ns(_db)
-                pending = pending_datasets(upload_root, cursor)
-                print(f"📤 GRAPE upload (dry run) — {len(pending)} un-shipped "
-                      f"dataset(s) in {upload_root}:")
-                for o in pending:
-                    print(f"   pending: {o}")
-                if not pending:
-                    print("   (nothing waiting — hs-uploader is current)")
-                sys.exit(0)
-
-            print("📤 GRAPE upload is owned by hs-uploader.service — refusing "
-                  "to run a second uploader.")
-            print(f"   spool:  {upload_root}")
-            print("   The daemon pumps every 30 s and ships whatever is new;")
-            print("   there is nothing to kick off by hand.")
-            print()
-            print("   See what is waiting:  hamsci-physics grape upload --dry-run")
-            print("   See delivery state:   hamsci-physics grape status")
-            print("   Watch it ship:        journalctl -u hs-uploader -f")
-            sys.exit(2)
-
-        elif args.grape_command == 'test-upload':
-            from .grape.uploader import test_psws_connectivity
-            import toml
-
-            config_path = Path(args.config)
-            if not config_path.exists():
-                print(f"Config not found: {config_path}")
-                sys.exit(1)
-            with open(config_path, 'r') as f:
-                config = toml.load(f)
-
-            ok = test_psws_connectivity(config)
-            sys.exit(0 if ok else 1)
-
         elif args.grape_command == 'timing-chain':
             sys.exit(run_timing_chain(args.data_root, args.date, args.chain_path, args.out_dir))
 
@@ -753,6 +684,9 @@ def main():
                     config = toml.load(f)
 
             print(f"\n📊 GRAPE Upload Status (hs_uploader → PSWS)")
+            # hs-uploader ships GRAPE with the machine's one PSWS key; prove
+            # that login with `smd psws verify` (this CLI has no key of its own).
+            print("   verify the PSWS login:  smd psws verify")
             upload_root = data_root / 'upload'
             # Read-only observer: building an Uploader here would construct
             # SqliteWatermarkStore, which WRITES on construct (schema init +

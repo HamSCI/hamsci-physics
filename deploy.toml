@@ -114,12 +114,9 @@ units = [
     "grape-daily.timer",
     "hamsci-physics-reanalysis.timer",
     "hamsci-physics-ionex-download.timer",
-    # grape-upload-retry.timer — RETIRED 2026-06-30 (single-host uploader):
-    # hs-uploader.service owns GRAPE upload retries.  Unit files retained
-    # (disable-not-delete), but there is no longer anything to revert TO:
-    # 2026-08-26 removed the in-process upload path entirely, and the
-    # `grape upload` command those units invoke now refuses and exits 2.
-    # Re-enabling them cannot resurrect a second uploader; it just fails.
+    # No upload unit: hs-uploader.service ships GRAPE (and retries).  The
+    # retired grape-upload-retry units and `grape upload` were removed
+    # 2026-10-01.
 ]
 
 # ---------------------------------------------------------------------------

@@ -108,3 +108,13 @@ def test_watchdog_units_have_the_binding_that_feeds_them():
     assert any(d.startswith("systemd-python") for d in deps), (
         f"{watchdog_units} use WatchdogSec but systemd-python is not a "
         f"dependency — systemd will kill them on schedule")
+
+
+def test_no_second_uploader_ships():
+    """hs-uploader owns GRAPE delivery.  The retired retry units and the
+    per-station key script (one key per uploading machine, mjh 2026-10-01)
+    are gone, not merely disabled."""
+    for gone in ("systemd/grape-upload-retry.service",
+                 "systemd/grape-upload-retry.timer",
+                 "scripts/setup-psws-keys.sh"):
+        assert not (ROOT / gone).exists(), gone

@@ -4,10 +4,10 @@ Two config shapes are in the wild and both have to work:
 
 * ``/etc/hamsci-physics/config.toml`` -- this repo's own file, created by
   the 2026-08-24 split.  It deliberately mirrors *mag-recorder's* field
-  names: ``[station].psws_station_id`` and ``[uploader].ssh_key_file``.
+  names: ``[station].psws_station_id``.
 * ``/etc/hf-timestd/timestd-config.toml`` -- what GRAPE read before the
   split, and what an un-migrated host still has.  It uses the older
-  ``[station].id`` and ``[uploader.sftp].ssh_key``.
+  ``[station].id``.
 
 Reading only the *second* shape is what silently killed GRAPE uploads on
 2026-08-25: the installed config had ``psws_station_id`` set, contract.py
@@ -18,19 +18,16 @@ every night.  One config, two names, two readers that disagreed.
 So: accept both spellings, prefer the new one, and keep this module free of
 third-party imports so the resolution can be unit-tested without numpy,
 h5py or hs_uploader present.
+
+No key is resolved here.  hs-uploader ships GRAPE with the machine's one PSWS
+key (/etc/hs-uploader/keys/id_ed25519_host, mjh 2026-10-01); the in-process
+upload path that read ``[uploader].ssh_key_file`` and a timestd-owned default
+is gone, and `smd psws verify` is the login probe.
 """
 
 from __future__ import annotations
 
-import os
 from typing import Any, Dict, Optional
-
-# grape-daily.service pins ``User=timestd``, and this is the key registered
-# with PSWS for that user.  hs_uploader's own default
-# (/etc/hs-uploader/keys/id_ed25519) is mode 0600 root:hsupload -- correct
-# for the daemon, unreadable by timestd -- so it is the wrong fallback for
-# the in-process path and would fail auth rather than fail loudly.
-DEFAULT_SSH_KEY = "/home/timestd/.ssh/id_rsa_psws"
 
 DEFAULT_HOST = "pswsnetwork.eng.ua.edu"
 
@@ -64,16 +61,6 @@ def instrument_id(config: Dict) -> str:
     return _first(_section(config, "station").get("instrument_id"))
 
 
-def ssh_key(config: Dict, *, default: Optional[str] = DEFAULT_SSH_KEY) -> str:
-    """Private key for the PSWS SFTP login, ``~`` expanded."""
-    key = _first(
-        _section(config, "uploader").get("ssh_key_file"),
-        _section(config, "uploader", "sftp").get("ssh_key"),
-        default,
-    )
-    return os.path.expanduser(key) if key else ""
-
-
 def sftp_host(config: Dict) -> str:
     """PSWS SFTP host; both shapes may override it, else the default."""
     return _first(
@@ -81,17 +68,3 @@ def sftp_host(config: Dict) -> str:
         _section(config, "uploader", "sftp").get("host"),
         DEFAULT_HOST,
     )
-
-
-def bandwidth_limit_kbps(config: Dict) -> Optional[int]:
-    """Transfer cap in kbit/s.  ``0``/empty means "no cap" (None)."""
-    for block in (_section(config, "uploader"),
-                  _section(config, "uploader", "sftp")):
-        bw = block.get("bandwidth_limit_kbps")
-        if bw in (0, "0", "", None):
-            continue
-        try:
-            return int(bw)
-        except (TypeError, ValueError):
-            continue
-    return None

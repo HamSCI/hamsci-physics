@@ -186,7 +186,7 @@ def pending_datasets(
 
     Mirrors FileTreeSource's KEEP-mode selection (``st_mtime_ns > cursor``)
     without importing hs_uploader or touching its watermark store, so
-    ``grape status`` / ``grape upload --dry-run`` can answer "what is still
+    ``grape status`` can answer "what is still
     waiting?" as pure read-only observers.  A ``None`` cursor means nothing
     is known to be shipped, so everything present is pending.
     """

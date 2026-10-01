@@ -24,8 +24,6 @@ MODULES = [
     "hamsci_physics.grape.raw_reader",
     "hamsci_physics.grape.packager",
     "hamsci_physics.grape.spectrogram",
-    "hamsci_physics.grape.uploader",
-    "hamsci_physics.grape.hs_upload",
     "hamsci_physics.cddis",
     "hamsci_physics.cddis_auth",
     "hamsci_physics.cli",
@@ -68,3 +66,13 @@ def test_ionex_script_reexports_the_canonical_parser():
         sys.path.insert(0, scripts_dir)
     import ionex_integration
     assert ionex_integration.IONEXParser is IONEXParser
+
+
+def test_the_in_process_upload_modules_are_gone():
+    import importlib
+    for mod in ("hamsci_physics.grape.uploader", "hamsci_physics.grape.hs_upload"):
+        try:
+            importlib.import_module(mod)
+        except ModuleNotFoundError:
+            continue
+        raise AssertionError(f"{mod} still exists: hs-uploader is the only uploader")

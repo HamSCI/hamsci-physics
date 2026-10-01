@@ -1,236 +1,100 @@
-# PSWS Authentication and Upload Setup Guide
+# PSWS Upload Setup Guide
 
-> **Operators:** the step-by-step narrative is [sigmond `operator/registration.md`](https://github.com/HamSCI/sigmond/blob/main/docs/operator/registration.md); this page is the per-transport reference.
+> **Operators:** the step-by-step narrative lives in [sigmond `operator/registration.md`](https://github.com/HamSCI/sigmond/blob/main/docs/operator/registration.md); this page covers what GRAPE needs.
 
 ## Overview
 
-The HamSCI PSWS (Personal Space Weather Station) network requires SSH key-based authentication for uploading GRAPE Digital RF data. This guide explains the complete setup process.
+hamsci-physics produces GRAPE datasets; it uploads nothing.  `grape-daily.timer`
+decimates, draws spectrograms and packages each day as Digital RF under
+`/var/lib/timestd/upload/<date>/OBS*`.  **hs-uploader** ships those datasets to
+the HamSCI PSWS (Personal Space Weather Station) network through its
+`grape-psws` pipeline, declared in this repo's `deploy.toml`.
 
-## Quick Reference
+PSWS authenticates each upload as the **station** account over SFTP with an SSH
+key.  A station needs three things from the portal and one key from the
+machine:
 
-| Item | Description | Example |
-|------|-------------|---------|
-| **SITE_ID** | Your PSWS station identifier | `S000171` |
-| **TOKEN** | Password for initial SSH key upload | (from PSWS admin page) |
-| **INSTRUMENT_ID** | Instrument number within your site | `172` |
-| **SSH Key** | Private key for authentication | `/home/timestd/.ssh/id_rsa_psws` |
+| Item | Where it comes from | Example |
+|------|---------------------|---------|
+| **Station id** (SITE_ID) | PSWS portal, when you create a site | `S000171` |
+| **Instrument id** | PSWS portal, when you add an instrument | `172` |
+| **Upload key** | this machine: `smd psws enroll` | `/etc/hs-uploader/keys/id_ed25519_host` |
 
-## PSWS Server Details
+**One key per uploading machine** (2026-10-01).  A machine that uploads for
+several stations uses its one key for all of them, and you register that same
+public key on each station's portal account.  A compromised machine then
+exposes only the stations it serves, and revoking its key touches only them.
 
-- **Server URL**: `pswsnetwork.eng.ua.edu`
-- **Registration Portal**: `pswsnetwork.caps.ua.edu`
-- **Protocol**: SFTP over SSH (port 22)
-- **Authentication**: SSH public key
+## PSWS server
 
-## Step-by-Step Setup
+- **SFTP server**: `pswsnetwork.eng.ua.edu`, port 22, SFTP only
+- **Portal**: <https://pswsnetwork.caps.ua.edu/>
+- **Authentication**: SSH public key, registered per station in the portal
 
-### Step 1: Create PSWS Account
+## Setup
 
-1. Navigate to https://pswsnetwork.caps.ua.edu/
-2. Create a new user account
-3. Log in to your account dashboard
+### 1. Create a PSWS account
 
-### Step 2: Create a Site
+1. Go to <https://pswsnetwork.caps.ua.edu/>.
+2. Create a user account and log in.
 
-In your PSWS account dashboard:
+### 2. Create a site
 
-1. **Create a new "Site"**
-   - Each site represents a physical location/station
-   - You will be assigned a **SITE_ID** (e.g., `S000171`)
-   
-2. **Record the TOKEN**
-   - When you create the site, you'll receive a **TOKEN** (password)
-   - This is displayed in the PSWS admin page for your site
-   - **Copy this exactly** - no extra spaces or missing characters
+In the portal dashboard, create a **Site** for the physical station.  The
+portal assigns its **station id** (e.g. `S000171`).
 
-### Step 3: Add an Instrument
+### 3. Add an instrument
 
-For each site, add an instrument:
+Add an instrument to the site (e.g. type "grape").  The portal assigns an
+**instrument id**, a short number (e.g. `172`).  It rides in the upload path,
+so a wrong value uploads successfully and lands where PSWS cannot match it.
 
-1. Select instrument type (e.g., "rx888", "grape")
-2. You will be assigned an **INSTRUMENT_ID** (e.g., `172`)
-3. Record this INSTRUMENT_ID
+### 4. Give the station its ids
 
-**Result**: You now have:
-- **SITE_ID**: `S000NNN` (e.g., `S000171`)
-- **TOKEN**: The password for this site
-- **INSTRUMENT_ID**: A number (e.g., `172`)
+On the station, set `[station] psws_station_id` and `instrument_id` in
+`/etc/hamsci-physics/config.toml`.  On an appliance station the wizard does
+this from `site-profile.toml`; `smd config hamsci-physics edit` does it by hand.
 
-### Step 4: Generate SSH Key Pair
-
-Generate a dedicated SSH key for PSWS uploads:
+### 5. Enroll the machine's key
 
 ```bash
-# Generate SSH key pair for PSWS (as the timestd user)
-sudo -u timestd ssh-keygen -t rsa -b 4096 -f /home/timestd/.ssh/id_rsa_psws -N "" -C "PSWS upload key"
-
-# Set correct permissions
-sudo chmod 600 /home/timestd/.ssh/id_rsa_psws
-sudo chmod 644 /home/timestd/.ssh/id_rsa_psws.pub
-sudo chown timestd:timestd /home/timestd/.ssh/id_rsa_psws*
+smd psws enroll     # creates this machine's upload key; prints the public key
 ```
 
-This creates:
-- Private key: `/home/timestd/.ssh/id_rsa_psws`
-- Public key: `/home/timestd/.ssh/id_rsa_psws.pub`
+Paste that public key into the portal for **each** station this machine
+uploads for.
 
-> **Note:** RSA keys are recommended for PSWS compatibility. Do NOT overwrite this key with a general-purpose key.
-
-### Step 5: Upload Public Key to PSWS
-
-Copy your SSH public key to the PSWS server using your SITE_ID and TOKEN:
+### 6. Prove the login
 
 ```bash
-# Replace S000171 with your actual SITE_ID
-sudo -u timestd ssh-copy-id -i /home/timestd/.ssh/id_rsa_psws.pub S000171@pswsnetwork.eng.ua.edu
+smd psws verify     # SFTP login as the station id, with the machine's key
 ```
 
-When prompted for password, enter your **TOKEN** from the PSWS admin page.
+Nothing is lost while you wait: `grape-daily` keeps packaging, and hs-uploader
+ships the backlog once the portal accepts the key.
 
-You should see: `Number of key(s) added: 1`
-
-> **Important:** The PSWS server is **sftp-only** — it rejects interactive SSH and SCP shell connections. If `ssh-copy-id` fails, you may need to upload the public key via the PSWS web portal instead.
-
-### Step 6: Test Authentication
-
-Verify the full upload chain with the built-in preflight check:
+## Watching delivery
 
 ```bash
-sudo -u timestd /opt/hf-timestd/venv/bin/hamsci-physics grape test-upload
-```
-
-This tests three things in sequence:
-1. **TCP connectivity** to `pswsnetwork.eng.ua.edu:22`
-2. **SSH key** exists at the configured path with correct permissions
-3. **SFTP autologin** connects and authenticates without a password
-
-Expected output when everything is configured correctly:
-```
-PSWS Upload Preflight Check
-  Host:    pswsnetwork.eng.ua.edu
-  User:    S000171
-  SSH key: /home/timestd/.ssh/id_rsa_psws
-
-[1/3] TCP connectivity to pswsnetwork.eng.ua.edu:22 ... OK (0.1s)
-[2/3] SSH key at /home/timestd/.ssh/id_rsa_psws ... OK
-      Public key: ssh-rsa AAAAB3NzaC1yc2EAAA...
-[3/3] SFTP autologin as S000171@pswsnetwork.eng.ua.edu ... OK (1.0s)
-
-All checks passed — PSWS upload should work.
-```
-
-If step 3 fails, authentication setup is incomplete — check your TOKEN and try Step 5 again.
-
-> **Note:** You must run this as the `timestd` user (via `sudo -u timestd`), since that user owns the SSH key. Running as your own user will show a helpful hint about this.
-
-### Step 7: Configure hf-timestd
-
-Edit `/etc/hamsci-physics/config.toml`:
-
-```toml
-[station]
-callsign = "YOUR_CALLSIGN"           # e.g., "W1ABC"
-grid_square = "YOUR_GRID"            # e.g., "FN31pr"
-id = "YOUR_SITE_ID"                  # e.g., "S000171"
-instrument_id = "YOUR_INSTRUMENT_ID" # e.g., "172"
-
-[uploader]
-enabled = true
-protocol = "sftp"
-
-[uploader.sftp]
-host = "pswsnetwork.eng.ua.edu"
-user = "YOUR_SITE_ID"                # Same as station.id
-ssh_key = "/home/timestd/.ssh/id_rsa_psws"
-bandwidth_limit_kbps = 100           # Optional: limit upload speed
-```
-
-### Step 8: Enable Daily Upload
-
-The grape-daily.service already includes package and upload steps. Ensure it's enabled:
-
-```bash
-sudo systemctl enable --now grape-daily.timer
-```
-
-## Manual Upload
-
-To manually upload a specific date:
-
-```bash
-# Package the data
-sudo -u timestd hamsci-physics grape package --date 2026-01-20 --callsign AC0G --grid EM38ww
-
-# Upload (dry-run first)
-sudo -u timestd hamsci-physics grape upload --date 2026-01-20 --dry-run
-
-# Actual upload: not a command you run
-# Uploading is hs-uploader.service's job — it pumps every 30 s and
-# ships whatever is new in the spool.  Watch it rather than driving it:
-journalctl -u hs-uploader -f
-sudo -u timestd hamsci-physics grape status
+hamsci-physics grape status          # cursor, pending datasets, recent outcomes
+journalctl -u hs-uploader -f         # the uploader itself
+journalctl -u grape-daily.service -n 50   # the nightly packaging run
 ```
 
 ## Troubleshooting
 
-### Authentication Issues
+**`smd psws verify` fails with "public key not registered"**
+- The portal does not hold this machine's key for that station yet.  Compare
+  `smd psws enroll`'s printed key with the portal's entry for the station.
+- Check the station id: the SFTP user *is* the station id.
 
-Start by running the preflight check to pinpoint which step fails:
+**Datasets upload but never appear in PSWS**
+- Check `instrument_id` against the portal; a wrong id uploads cleanly and
+  matches nothing.
 
-```bash
-sudo -u timestd /opt/hf-timestd/venv/bin/hamsci-physics grape test-upload
-```
-
-**Problem**: `ssh-copy-id` rejects the password
-
-**Solutions**:
-1. Verify SITE_ID is correct (check PSWS admin page)
-2. Copy TOKEN again carefully (no extra spaces)
-3. Try typing the TOKEN manually instead of pasting
-
-**Problem**: Preflight check 3 fails (SFTP autologin rejected)
-
-**Solutions**:
-1. Verify key path is correct in config (`[uploader.sftp].ssh_key`)
-2. Check key permissions: `ls -la /home/timestd/.ssh/id_rsa_psws` (should be `600`)
-3. Verify public key is registered with PSWS: compare output of `cat /home/timestd/.ssh/id_rsa_psws.pub` with what's on the PSWS admin page
-4. Test with verbose output: `sudo -u timestd sftp -v -i /home/timestd/.ssh/id_rsa_psws S000171@pswsnetwork.eng.ua.edu`
-
-### Upload Issues
-
-**Problem**: Upload fails with permission denied
-
-**Solutions**:
-1. Verify authentication is working (Step 6)
-2. Check SITE_ID matches your account
-3. Ensure config file has correct `[uploader.sftp]` settings
-
-**Problem**: Files upload but don't appear in PSWS
-
-**Solutions**:
-1. Check that trigger directory was created
-2. Verify INSTRUMENT_ID matches your PSWS configuration
-3. Check Digital RF format is valid
-
-## Security Best Practices
-
-1. **Dedicated key**: Use a separate SSH key for PSWS (not your personal key)
-2. **Restrict permissions**: `chmod 600` on private key
-3. **Service user**: Run uploads as `timestd` user, not root
-4. **Config permissions**: `chmod 640 /etc/hamsci-physics/config.toml`
-5. **Never commit keys**: Add `.ssh/` to `.gitignore`
-
-## Upload Log Location
-
-Upload status is logged to the systemd journal:
-
-```bash
-# View recent upload logs
-journalctl -u grape-daily.service -n 50
-
-# Follow live
-journalctl -u grape-daily.service -f
-```
+**`grape status` shows datasets pending for days**
+- Check `journalctl -u hs-uploader` for the transport's error, and
+  `smd config uploads status` in case uploads are disabled site-wide.
 
 ## References
 
