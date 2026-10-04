@@ -75,6 +75,17 @@ kind = "link"
 src  = "venv/bin/hamsci-physics"
 dst  = "/usr/local/bin/hamsci-physics"
 
+# The config this client needs, declared the contract way (kind = "render"):
+# sigmond reads it to judge `configured`, and ops' site-capture compares the
+# live file with this template to record the site's deltas.  The `name`/`run`
+# step below that copies it has never executed (see the note above it).
+[[install.steps]]
+kind      = "render"
+src       = "config/hamsci-physics-config.toml.template"
+dst       = "/etc/hamsci-physics/config.toml"
+mode      = "0644"
+if_absent = true
+
 # ⚠ The three steps below use `name`/`run`, which the client contract does not
 # define -- it specifies kind = "link" | "copy" | "render" -- and sigmond
 # implements only `link`.  So these have never executed.  A fresh station gets
