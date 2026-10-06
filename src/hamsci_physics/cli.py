@@ -471,6 +471,11 @@ def main():
                 _save_status()
                 sys.exit(1)
             print(f"   ✅ GATE PASSED: {len(obs_dirs)} dataset(s) ready")
+            try:
+                from .grape.spool import mark_day_packaged
+                mark_day_packaged(upload_dir)
+            except OSError as exc:  # a missing marker costs one retry, never the product
+                print(f"   ⚠️  could not mark {upload_dir} packaged (continuing): {exc}")
 
             # === Stage 4: Upload to PSWS ===
             upload_attempted = False
@@ -569,8 +574,8 @@ def main():
             # The timer only ever processed "yesterday", so a failed or
             # skipped night became a permanent portal hole (AC0G-B4 lost
             # 20260730 entirely and 20260803 to a package crash). After
-            # the normal run, retry any of the previous 7 days that never
-            # reached .upload_complete and still have source data, by
+            # the normal run, retry any of the previous 7 days that
+            # spool.day_needs_retry finds unpackaged with source data, by
             # re-invoking this same pipeline per day. GRAPE_SWEEP guards
             # against recursion; failures are per-day and non-fatal.
             if not os.environ.get('GRAPE_SWEEP') and not args.date:
@@ -579,13 +584,8 @@ def main():
                 today = datetime.now(tz=timezone.utc).date()
                 for back in range(2, 8):   # yesterday was handled above
                     d = (today - timedelta(days=back)).strftime('%Y%m%d')
-                    day_dir = data_root / 'upload' / d
-                    if day_dir.exists() and list(day_dir.rglob('.upload_complete')):
-                        continue
-                    has_src = (any((data_root / 'raw_buffer').glob(f'*/{d}'))
-                               or any((data_root / 'products')
-                                      .glob(f'*/decimated/{d}.bin')))
-                    if not has_src:
+                    from .grape.spool import day_needs_retry
+                    if not day_needs_retry(data_root, d):
                         continue
                     print(f"\n🔁 sweep: retrying incomplete day {d}")
                     _grape_sweep_retry(d, data_root, config_path)

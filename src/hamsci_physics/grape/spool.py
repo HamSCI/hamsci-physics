@@ -280,3 +280,36 @@ def trim_spool(
                     package.name, size)
 
     return result
+
+
+PACKAGED_MARKER = ".upload_complete"
+
+
+def mark_day_packaged(day_dir: Path) -> Path:
+    """Record that ``day_dir`` holds a finished GRAPE package.
+
+    grape-daily's catch-up sweep skips any day whose ``upload/<day>/`` carries
+    this marker.  Nothing wrote it after hf-timestd af45a6a retired SFTPUpload,
+    so the sweep re-packaged days 2-7 back every night, and every re-package
+    moved the OBS mtime past the send record, which re-sent the day.
+    """
+    day_dir.mkdir(parents=True, exist_ok=True)
+    marker = day_dir / PACKAGED_MARKER
+    marker.touch(exist_ok=True)
+    return marker
+
+
+def day_needs_retry(data_root: Path, day: str) -> bool:
+    """True when the catch-up sweep should re-run ``day``.
+
+    A day counts as packaged when ``upload/<day>/`` holds the marker anywhere
+    below it, or already holds an OBS* dataset, the test Gate 3 applies.  The
+    second test covers days packaged before the marker existed, so the first
+    night after this change re-sends nothing.  An unpackaged day re-runs only
+    while its source (raw_buffer or decimated) remains on disk."""
+    day_dir = data_root / "upload" / day
+    if day_dir.exists() and (any(day_dir.rglob(PACKAGED_MARKER))
+                             or any(day_dir.rglob("OBS*"))):
+        return False
+    return (any((data_root / "raw_buffer").glob(f"*/{day}"))
+            or any((data_root / "products").glob(f"*/decimated/{day}.bin")))
