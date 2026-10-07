@@ -56,13 +56,49 @@ def test_a_marker_deeper_in_the_day_still_counts(tmp_path):
     assert not day_needs_retry(tmp_path, "20261001")
 
 
+def _obs(root: Path, day: str) -> Path:
+    obs = root / "upload" / day / "AC0G_EM38ww" / "OBS2026-10-01T00-00"
+    (obs / "ch0").mkdir(parents=True)
+    return obs
+
+
 def test_a_day_packaged_before_the_marker_existed_is_not_retried(tmp_path):
-    # Existing stations hold OBS* datasets with no marker.  Gate 3's own test
-    # counts them as packaged, so the first night after deploy re-sends nothing.
+    # Existing stations hold finished OBS* datasets with no marker.  The
+    # packager writes gap_summary.json last, so its presence shows the
+    # dataset finished, and the first night after deploy re-sends nothing.
     _source(tmp_path, "20261001")
-    obs = tmp_path / "upload" / "20261001" / "AC0G_EM38ww" / "OBS2026-10-01T00-00"
-    obs.mkdir(parents=True)
+    obs = _obs(tmp_path, "20261001")
+    (obs / "gap_summary.json").write_text('{"date": "2026-10-01"}')
     assert not day_needs_retry(tmp_path, "20261001")
+
+
+def test_a_package_that_crashed_mid_write_needs_a_retry(tmp_path):
+    # package_day creates OBS.../ch0 before it writes the Digital RF data.  A
+    # crash mid-write leaves that directory, no gap_summary.json and no
+    # marker: the crash the sweep exists to repair (B4 20260731, 20260803).
+    _source(tmp_path, "20261001")
+    _obs(tmp_path, "20261001")
+    assert day_needs_retry(tmp_path, "20261001")
+
+
+def test_a_crashed_package_with_the_marker_is_not_retried(tmp_path):
+    # The marker wins: sigmond's sink doors write it on purpose.
+    _source(tmp_path, "20261001")
+    _obs(tmp_path, "20261001")
+    mark_day_packaged(tmp_path / "upload" / "20261001")
+    assert not day_needs_retry(tmp_path, "20261001")
+
+
+def test_the_packager_writes_gap_summary_last():
+    # day_needs_retry trusts gap_summary.json as the finished-dataset sign
+    # only while package_day writes it after the data and the metadata.
+    from hamsci_physics.grape import packager
+    body = inspect.getsource(packager.DailyDRFPackager.package_day)
+    drf = body.index("self._write_drf(")
+    meta = body.index("self._write_metadata(")
+    gaps = body.index("self._write_gap_summary(")
+    assert drf < meta < gaps
+    assert "self._write_" not in body[gaps + 1:]
 
 
 def test_the_marker_never_looks_like_a_dataset(tmp_path):

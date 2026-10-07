@@ -299,17 +299,27 @@ def mark_day_packaged(day_dir: Path) -> Path:
     return marker
 
 
+#: The file DailyDRFPackager.package_day writes last into an OBS* dataset.
+FINISHED_DATASET_FILE = "gap_summary.json"
+
+
 def day_needs_retry(data_root: Path, day: str) -> bool:
     """True when the catch-up sweep should re-run ``day``.
 
     A day counts as packaged when ``upload/<day>/`` holds the marker anywhere
-    below it, or already holds an OBS* dataset, the test Gate 3 applies.  The
-    second test covers days packaged before the marker existed, so the first
-    night after this change re-sends nothing.  An unpackaged day re-runs only
-    while its source (raw_buffer or decimated) remains on disk."""
+    below it, or holds an OBS* dataset that contains gap_summary.json.  The
+    packager writes that file last, after the Digital RF data and metadata.
+    The second test covers days packaged before the marker existed, so the
+    first night after this change re-sends nothing.  A bare OBS* directory
+    does not count: package_day creates OBS.../ch0 before it writes the data,
+    so a crash mid-write leaves one, and the sweep must repair that day.  An
+    unpackaged day re-runs only while its source (raw_buffer or decimated)
+    remains on disk."""
     day_dir = data_root / "upload" / day
-    if day_dir.exists() and (any(day_dir.rglob(PACKAGED_MARKER))
-                             or any(day_dir.rglob("OBS*"))):
+    if day_dir.exists() and (
+            any(day_dir.rglob(PACKAGED_MARKER))
+            or any((obs / FINISHED_DATASET_FILE).is_file()
+                   for obs in day_dir.rglob("OBS*") if obs.is_dir())):
         return False
     return (any((data_root / "raw_buffer").glob(f"*/{day}"))
             or any((data_root / "products").glob(f"*/decimated/{day}.bin")))
