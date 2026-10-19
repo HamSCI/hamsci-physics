@@ -113,7 +113,7 @@ run  = "install -d -o timestd -g timestd -m 0755 /var/lib/timestd/phase2/fusion 
 #
 # hamsci-physics-fusion.service IS enabled.  hf-timestd's manifest carried a
 # comment calling the stage "DISABLED 2026-08-10 ... produces nothing
-# trustworthy", but the running system disagrees: on B4 it writes ~14
+# trustworthy", but the running system disagrees: AC0G-ND writes ~100
 # carrier-phase dTEC records a minute plus differential dTEC for WWV/WWVH/BPM,
 # reading and writing the SQLite store.  Leaving it out of this list would
 # have made the cutover silently stop live science.
