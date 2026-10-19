@@ -272,6 +272,19 @@ class PhysicsFusionService:
                 f"No L2 channels in the store yet ({self._store_path()}); "
                 f"rediscovering every {self._channel_discovery_empty_s:.0f} s")
         self._reader_cache: Dict[str, DataProductReader] = {}
+
+        # L2 starvation watch (row 15, v3.73).  The loop pets the watchdog
+        # whether or not it reads anything, so a starved loop looks healthy
+        # to systemd.  Warn when no L2 slice has held data for
+        # _l2_starved_after_s (this also covers a service that starts
+        # starved), repeat the count every _l2_starved_repeat_s, and log one
+        # INFO line when data returns.  New minutes come due every 60 s and
+        # the loop reads them 2+ min late, so 180 s rules out normal lag.
+        self._l2_starved_after_s = 180.0
+        self._l2_starved_repeat_s = 600.0
+        self._last_l2_data_at = time.time()
+        self._l2_starved_since: Optional[float] = None
+        self._l2_starved_logged_at = 0.0
         self._minute_first_attempt: Dict[int, float] = {}  # minute_ts → first attempt epoch
         self._minute_last_attempt: Dict[int, float] = {}  # minute_ts → last attempt epoch
         self._processed_minutes: set = set()  # Minutes successfully processed — never re-process
@@ -508,6 +521,32 @@ class PhysicsFusionService:
         self._next_channel_discovery = now + (
             self._channel_discovery_full_s if self.channels
             else self._channel_discovery_empty_s)
+
+    def _note_l2_read(self, now: float, got_data: bool) -> None:
+        """Record one L2 slice read; log recovery if the loop was starved."""
+        if not got_data:
+            return
+        if self._l2_starved_since is not None:
+            gap_min = (now - self._last_l2_data_at) / 60.0
+            logger.info(f"L2 data returned after {gap_min:.0f} min without any")
+            self._l2_starved_since = None
+        self._last_l2_data_at = now
+
+    def _check_l2_starvation(self, now: float) -> None:
+        """Warn once on going starved, then every _l2_starved_repeat_s."""
+        idle = now - self._last_l2_data_at
+        if idle < self._l2_starved_after_s:
+            return
+        if (self._l2_starved_since is not None
+                and now - self._l2_starved_logged_at < self._l2_starved_repeat_s):
+            return
+        if self._l2_starved_since is None:
+            self._l2_starved_since = now
+        self._l2_starved_logged_at = now
+        logger.warning(
+            f"No L2 data for {idle / 60.0:.0f} min: writing no L3 physics, "
+            f"TEC or dTEC.  Channels: {', '.join(self.channels) or 'none'}; "
+            f"store {self._store_path()}")
 
     def _check_upstream_freshness(self) -> Tuple[bool, float]:
         """
@@ -1837,6 +1876,7 @@ class PhysicsFusionService:
                     # Try to process this minute
                     self._pet_watchdog()
                     station_data = self._read_l2_slice(target_minute)
+                    self._note_l2_read(time.time(), bool(station_data))
                     self._pet_watchdog()
                     if station_data:
                         ok = self.process_minute(target_minute, station_data=station_data)
@@ -1856,6 +1896,7 @@ class PhysicsFusionService:
                             logger.debug(f"No L2 data for minute {target_minute}, will retry for up to {self._retry_abandon_seconds}s")
                         self._minute_last_attempt[target_minute] = now
 
+                self._check_l2_starvation(time.time())
                 self._prune_retry_counters(now)
                 
                 # Sleep until next poll or minute
