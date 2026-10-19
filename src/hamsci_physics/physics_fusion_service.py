@@ -36,7 +36,7 @@ import argparse
 import signal
 import threading
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Set, Tuple
+from typing import Callable, Dict, List, Optional, Any, Set, Tuple
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
@@ -98,8 +98,12 @@ class PhysicsFusionService:
         receiver_lon: Optional[float] = None,
         gnss_vtec_dir: Optional[Path] = None,
         storage_config: Optional[Dict] = None,
+        clock: Callable[[], float] = time.monotonic,
     ):
         self.data_root = Path(data_root)
+        # Monotonic clock for the rediscovery and starvation timers.  Tests
+        # inject a fake one; minute targets still come from wall time.
+        self._clock = clock
         self.output_dir = Path(output_dir)
         self.poll_interval = poll_interval
         self.lookback_minutes = lookback_minutes
@@ -260,11 +264,11 @@ class PhysicsFusionService:
         # discovers nothing; on B4 after the 10-15 reflash it then read zero
         # channels for four days and wrote no L3 rows.  An empty list retries
         # every 30 s; a populated one refreshes every 10 min to pick up a
-        # channel added later.  The query reads the (channel, timestamp)
-        # index, so it costs little.
+        # channel added later.  See _query_channels for the query's cost.
         self._channel_discovery_empty_s = 30.0
         self._channel_discovery_full_s = 600.0
-        self._next_channel_discovery = time.monotonic() + (
+        self._channel_discovery_failing = False
+        self._next_channel_discovery = self._clock() + (
             self._channel_discovery_full_s if self.channels
             else self._channel_discovery_empty_s)
         if not self.channels:
@@ -282,9 +286,11 @@ class PhysicsFusionService:
         # the loop reads them 2+ min late, so 180 s rules out normal lag.
         self._l2_starved_after_s = 180.0
         self._l2_starved_repeat_s = 600.0
-        self._last_l2_data_at = time.time()
+        self._last_l2_data_at = self._clock()
         self._l2_starved_since: Optional[float] = None
         self._l2_starved_logged_at = 0.0
+        # Minutes back the loop scans; run() widens it after a restart gap.
+        self._max_lookback = 5
         self._minute_first_attempt: Dict[int, float] = {}  # minute_ts → first attempt epoch
         self._minute_last_attempt: Dict[int, float] = {}  # minute_ts → last attempt epoch
         self._processed_minutes: set = set()  # Minutes successfully processed — never re-process
@@ -497,11 +503,49 @@ class PhysicsFusionService:
             logger.debug(f"upstream store query failed ({db}): {exc}")
             return []
 
+    def _query_channels(self) -> Optional[List[str]]:
+        """Available L2 channels, sorted; None when the query FAILED.
+
+        A missing store or a missing table means "no channels yet" and
+        returns [].  Any other sqlite3 error (locked, corrupt) returns None,
+        so the caller can keep the set it already has.
+
+        The query walks the (channel, timestamp_utc) index as a loose index
+        scan: one index probe per distinct channel.  SELECT DISTINCT channel
+        would read every index entry; on AC0G-ND (10-19) that meant a
+        covering-index scan of 59k rows, and the cost grows with retention.
+        """
+        db = self._store_path()
+        if not db.exists():
+            return []
+        t = self.L2_TABLE
+        sql = (
+            f"WITH RECURSIVE ch(c) AS ("
+            f" SELECT MIN(channel) FROM {t}"
+            f" UNION ALL"
+            f" SELECT (SELECT MIN(channel) FROM {t} WHERE channel > ch.c)"
+            f" FROM ch WHERE ch.c IS NOT NULL)"
+            f" SELECT c FROM ch WHERE c IS NOT NULL"
+        )
+        try:
+            con = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=5.0)
+            try:
+                rows = con.execute(sql).fetchall()
+            finally:
+                con.close()
+        except sqlite3.OperationalError as exc:
+            if 'no such table' in str(exc):
+                return []
+            self._last_discovery_error = f"{db}: {exc}"
+            return None
+        except sqlite3.Error as exc:
+            self._last_discovery_error = f"{db}: {exc}"
+            return None
+        return [r[0] for r in rows if r[0]]
+
     def _discover_channels(self) -> List[str]:
         """Available L2 broadcast channels, from the data-product store."""
-        rows = self._store_query(
-            f"SELECT DISTINCT channel FROM {self.L2_TABLE} ORDER BY channel")
-        return [r[0] for r in rows if r[0]]
+        return self._query_channels() or []
 
     def _refresh_channels(self) -> None:
         """Re-run channel discovery once its interval has lapsed.
@@ -509,10 +553,23 @@ class PhysicsFusionService:
         Logs only when the channel set changes, so a store that stays empty
         produces one warning (at startup), not one a minute.
         """
-        now = time.monotonic()
+        now = self._clock()
         if now < self._next_channel_discovery:
             return
-        found = self._discover_channels()
+        found = self._query_channels()
+        if found is None:
+            # The query failed.  Keep the set we have: an error must never
+            # read as "every channel vanished".
+            if not self._channel_discovery_failing:
+                logger.warning(
+                    f"L2 channel discovery failed, keeping "
+                    f"{len(self.channels)} known channel(s): "
+                    f"{getattr(self, '_last_discovery_error', '?')}")
+                self._channel_discovery_failing = True
+            found = self.channels
+        elif self._channel_discovery_failing:
+            logger.info("L2 channel discovery works again")
+            self._channel_discovery_failing = False
         if found != self.channels:
             logger.info(
                 f"L2 channels changed: {len(self.channels)} -> {len(found)} "
@@ -1838,7 +1895,7 @@ class PhysicsFusionService:
         # output first so the wider window does not reprocess (and duplicate)
         # minutes already written before the restart (P-H25).
         self._seed_processed_minutes_from_l3()
-        max_lookback = self._startup_lookback_minutes()
+        self._max_lookback = self._startup_lookback_minutes()
         
         while self.running:
             try:
@@ -1846,58 +1903,7 @@ class PhysicsFusionService:
                 if SYSTEMD_AVAILABLE:
                     systemd_daemon.notify('WATCHDOG=1')
                 
-                # Align to next minute boundary processing
-                now = time.time()
-                # Process last few minutes to find enough frequencies for verification
-                # L2 calibration service has ~1-2 minute lag, so we look back 2-5 minutes
-                # We retry each minute up to 3 times to handle L2 write delays.
-                # max_lookback starts wide on restart (to cover any gap) and
-                # shrinks to 5 once we have caught up to within 5 minutes of now.
-                if max_lookback > 5:
-                    oldest_target = int(now) - (int(now) % 60) - (60 * max_lookback)
-                    if self.last_processed_minute >= oldest_target:
-                        max_lookback = max(5, max_lookback - 1)
-                for offset in range(max_lookback, 1, -1):
-                    target_minute = int(now) - (int(now) % 60) - (60 * offset)
-
-                    # Never re-process a minute that already succeeded
-                    if target_minute in self._processed_minutes:
-                        continue
-
-                    # Time-based retry: abandon after _retry_abandon_seconds,
-                    # cooldown between attempts to avoid hammering the reader.
-                    first_attempt = self._minute_first_attempt.get(target_minute)
-                    if first_attempt is not None and (now - first_attempt) > self._retry_abandon_seconds:
-                        continue  # Abandoned — past retry window
-                    last_attempt = self._minute_last_attempt.get(target_minute, 0.0)
-                    if (now - last_attempt) < self._retry_cooldown_seconds:
-                        continue  # Cooling down — skip this pass
-
-                    # Try to process this minute
-                    self._pet_watchdog()
-                    station_data = self._read_l2_slice(target_minute)
-                    self._note_l2_read(time.time(), bool(station_data))
-                    self._pet_watchdog()
-                    if station_data:
-                        ok = self.process_minute(target_minute, station_data=station_data)
-                        if ok:
-                            self.last_processed_minute = max(self.last_processed_minute, target_minute)
-                            self._processed_minutes.add(target_minute)
-                            self._minute_first_attempt.pop(target_minute, None)
-                            self._minute_last_attempt.pop(target_minute, None)
-                        else:
-                            if first_attempt is None:
-                                self._minute_first_attempt[target_minute] = now
-                            self._minute_last_attempt[target_minute] = now
-                            logger.warning(f"L3 write failed for minute {target_minute}, will retry")
-                    else:
-                        if first_attempt is None:
-                            self._minute_first_attempt[target_minute] = now
-                            logger.debug(f"No L2 data for minute {target_minute}, will retry for up to {self._retry_abandon_seconds}s")
-                        self._minute_last_attempt[target_minute] = now
-
-                self._check_l2_starvation(time.time())
-                self._prune_retry_counters(now)
+                self._poll_once()
                 
                 # Sleep until next poll or minute
                 # We process once per minute, check every second for shutdown
@@ -1906,6 +1912,61 @@ class PhysicsFusionService:
             except Exception as e:
                 logger.error(f"Error in main loop: {e}", exc_info=True)
                 time.sleep(10)
+
+    def _poll_once(self) -> None:
+        """One pass of the run loop: read and process the due minutes."""
+        # Align to next minute boundary processing
+        now = time.time()
+        # Process last few minutes to find enough frequencies for verification
+        # L2 calibration service has ~1-2 minute lag, so we look back 2-5 minutes
+        # We retry each minute up to 3 times to handle L2 write delays.
+        # self._max_lookback starts wide on restart (to cover any gap) and
+        # shrinks to 5 once we have caught up to within 5 minutes of now.
+        if self._max_lookback > 5:
+            oldest_target = int(now) - (int(now) % 60) - (60 * self._max_lookback)
+            if self.last_processed_minute >= oldest_target:
+                self._max_lookback = max(5, self._max_lookback - 1)
+        for offset in range(self._max_lookback, 1, -1):
+            target_minute = int(now) - (int(now) % 60) - (60 * offset)
+
+            # Never re-process a minute that already succeeded
+            if target_minute in self._processed_minutes:
+                continue
+
+            # Time-based retry: abandon after _retry_abandon_seconds,
+            # cooldown between attempts to avoid hammering the reader.
+            first_attempt = self._minute_first_attempt.get(target_minute)
+            if first_attempt is not None and (now - first_attempt) > self._retry_abandon_seconds:
+                continue  # Abandoned — past retry window
+            last_attempt = self._minute_last_attempt.get(target_minute, 0.0)
+            if (now - last_attempt) < self._retry_cooldown_seconds:
+                continue  # Cooling down — skip this pass
+
+            # Try to process this minute
+            self._pet_watchdog()
+            station_data = self._read_l2_slice(target_minute)
+            self._note_l2_read(self._clock(), bool(station_data))
+            self._pet_watchdog()
+            if station_data:
+                ok = self.process_minute(target_minute, station_data=station_data)
+                if ok:
+                    self.last_processed_minute = max(self.last_processed_minute, target_minute)
+                    self._processed_minutes.add(target_minute)
+                    self._minute_first_attempt.pop(target_minute, None)
+                    self._minute_last_attempt.pop(target_minute, None)
+                else:
+                    if first_attempt is None:
+                        self._minute_first_attempt[target_minute] = now
+                    self._minute_last_attempt[target_minute] = now
+                    logger.warning(f"L3 write failed for minute {target_minute}, will retry")
+            else:
+                if first_attempt is None:
+                    self._minute_first_attempt[target_minute] = now
+                    logger.debug(f"No L2 data for minute {target_minute}, will retry for up to {self._retry_abandon_seconds}s")
+                self._minute_last_attempt[target_minute] = now
+
+        self._check_l2_starvation(self._clock())
+        self._prune_retry_counters(now)
 
     def _signal_handler(self, signum, frame):
         logger.info(f"Signal {signum} received, shutting down...")

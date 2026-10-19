@@ -84,3 +84,62 @@ def test_producing_then_starved_warns_on_the_transition(tmp_path, caplog):
     assert _records(caplog, logging.WARNING) == []
     svc._check_l2_starvation(t + svc._l2_starved_after_s + 1)
     assert len(_records(caplog, logging.WARNING)) == 1
+
+
+# ---------------------------------------------------------------------------
+# The call sites: one pass of the real run loop must feed the watch.
+# ---------------------------------------------------------------------------
+
+class _Clock:
+    def __init__(self, t: float):
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+
+def _loop_service(tmp_path: Path, clock: _Clock) -> PhysicsFusionService:
+    db = tmp_path / "timestd.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE L2_timing_measurements ("
+                " channel TEXT NOT NULL, timestamp_utc TEXT NOT NULL)")
+    con.commit()
+    con.close()
+    data_root = tmp_path / "data"
+    (data_root / "phase2").mkdir(parents=True)
+    (tmp_path / "out").mkdir()
+    svc = PhysicsFusionService(data_root=data_root, output_dir=tmp_path / "out",
+                               storage_config={"sqlite_path": str(db)},
+                               clock=clock)
+    svc._max_lookback = 5
+    return svc
+
+
+def test_a_starved_run_loop_pass_warns(tmp_path, caplog):
+    clock = _Clock(5000.0)
+    svc = _loop_service(tmp_path, clock)
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
+    svc._poll_once()
+    assert _records(caplog, logging.WARNING) == []
+    clock.t += svc._l2_starved_after_s + 1
+    svc._poll_once()
+    assert len(_records(caplog, logging.WARNING)) == 1
+
+
+def test_a_run_loop_pass_that_reads_data_ends_the_starvation(tmp_path, caplog, monkeypatch):
+    clock = _Clock(5000.0)
+    svc = _loop_service(tmp_path, clock)
+    caplog.set_level(logging.DEBUG, logger=LOGGER)
+    clock.t += svc._l2_starved_after_s + 1
+    svc._poll_once()                                   # starved: warns
+    assert len(_records(caplog, logging.WARNING)) == 1
+    monkeypatch.setattr(svc, "_read_l2_slice",
+                        lambda minute: {"WWV": [{"frequency_hz": 10e6}]})
+    monkeypatch.setattr(svc, "process_minute",
+                        lambda minute, station_data=None: True)
+    clock.t += 1
+    # The retry cooldown runs on wall time; clear it as 10 s of waiting would.
+    svc._minute_last_attempt.clear()
+    svc._poll_once()
+    infos = _records(caplog, logging.INFO)
+    assert len(infos) == 1 and "returned" in infos[0].getMessage()
