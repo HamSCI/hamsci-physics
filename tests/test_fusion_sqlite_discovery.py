@@ -114,3 +114,38 @@ def test_missing_store_is_stale_not_a_crash(tmp_path):
     is_fresh, age = svc._check_upstream_freshness()
     assert is_fresh is False
     assert svc._discover_channels() == []
+
+
+def test_service_started_before_the_first_l2_row_still_finds_it(tmp_path):
+    """Row 15 of v3.73: B4's fusion service wrote nothing for four days.
+
+    After the 10-15 reflash, hamsci-physics-fusion started at 13:49:47Z.
+    hf-timestd wrote its first L2 row at 13:51:29Z.  The service discovered
+    its channels once, in ``__init__``, found none, and never looked again:
+    every minute read zero channels, so L3_physics, L3_dtec and the
+    AGGREGATED L3_tec rows stayed empty.  AC0G-ND runs the same code and
+    writes them, because its service started after L2 existed.
+
+    A service that starts on an empty store must pick the channels up once
+    rows land, without a restart.
+    """
+    db = _make_store(tmp_path, [])            # table exists, no rows yet
+    svc = _service(tmp_path, db)
+    assert svc.channels == []
+
+    minute = int(datetime.now(timezone.utc).timestamp()) // 60 * 60 - 120
+    dt = datetime.fromtimestamp(minute + 30, tz=timezone.utc)
+    con = sqlite3.connect(db)
+    con.execute(
+        "INSERT INTO L2_timing_measurements"
+        " (channel, timestamp_utc, minute_boundary_utc, station, frequency_mhz)"
+        " VALUES (?, ?, ?, ?, ?)",
+        ("SHARED_10000", dt.isoformat(), minute, "WWV", 10.0),
+    )
+    con.commit()
+    con.close()
+
+    # Let the rediscovery interval lapse, as it would within a minute live.
+    svc._next_channel_discovery = 0.0
+    svc._read_l2_slice(minute)
+    assert svc.channels == ["SHARED_10000"]

@@ -255,6 +255,22 @@ class PhysicsFusionService:
         self.running = False
         self.last_processed_minute = 0
         self.channels = self._discover_channels()
+        # Channel discovery repeats while the service runs (row 15, v3.73).
+        # A service that starts before hf-timestd writes its first L2 row
+        # discovers nothing; on B4 after the 10-15 reflash it then read zero
+        # channels for four days and wrote no L3 rows.  An empty list retries
+        # every 30 s; a populated one refreshes every 10 min to pick up a
+        # channel added later.  The query reads the (channel, timestamp)
+        # index, so it costs little.
+        self._channel_discovery_empty_s = 30.0
+        self._channel_discovery_full_s = 600.0
+        self._next_channel_discovery = time.monotonic() + (
+            self._channel_discovery_full_s if self.channels
+            else self._channel_discovery_empty_s)
+        if not self.channels:
+            logger.warning(
+                f"No L2 channels in the store yet ({self._store_path()}); "
+                f"rediscovering every {self._channel_discovery_empty_s:.0f} s")
         self._reader_cache: Dict[str, DataProductReader] = {}
         self._minute_first_attempt: Dict[int, float] = {}  # minute_ts → first attempt epoch
         self._minute_last_attempt: Dict[int, float] = {}  # minute_ts → last attempt epoch
@@ -474,6 +490,25 @@ class PhysicsFusionService:
             f"SELECT DISTINCT channel FROM {self.L2_TABLE} ORDER BY channel")
         return [r[0] for r in rows if r[0]]
 
+    def _refresh_channels(self) -> None:
+        """Re-run channel discovery once its interval has lapsed.
+
+        Logs only when the channel set changes, so a store that stays empty
+        produces one warning (at startup), not one a minute.
+        """
+        now = time.monotonic()
+        if now < self._next_channel_discovery:
+            return
+        found = self._discover_channels()
+        if found != self.channels:
+            logger.info(
+                f"L2 channels changed: {len(self.channels)} -> {len(found)} "
+                f"({', '.join(found) or 'none'})")
+            self.channels = found
+        self._next_channel_discovery = now + (
+            self._channel_discovery_full_s if self.channels
+            else self._channel_discovery_empty_s)
+
     def _check_upstream_freshness(self) -> Tuple[bool, float]:
         """
         Check if upstream L2 data is fresh enough.
@@ -510,6 +545,8 @@ class PhysicsFusionService:
         start_iso = datetime.fromtimestamp(minute_timestamp, tz=timezone.utc).isoformat().replace('+00:00', 'Z')
         end_iso = datetime.fromtimestamp(minute_timestamp + 59.999, tz=timezone.utc).isoformat().replace('+00:00', 'Z')
         
+        self._refresh_channels()
+
         # Collect raw measurements grouped by (station, frequency_mhz)
         raw_by_station_freq: Dict[Tuple[str, float, str], List[Dict]] = defaultdict(list)
         
