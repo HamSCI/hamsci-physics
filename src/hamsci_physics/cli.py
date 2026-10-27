@@ -85,6 +85,35 @@ def _handle_validate(args):
 
 
 
+def _station_identity(config, config_path) -> tuple:
+    """``station.callsign`` and ``station.grid_square``, or refuse to run.
+
+    These two strings name the GRAPE package directory
+    (``<callsign>_<grid_square>``), ride in the dataset metadata, and are
+    the sole source of the receiver latitude/longitude the science is
+    computed against.
+
+    They used to fall back to ``'AC0G'`` / ``'EM38ww'`` — one real
+    station's identity, hardcoded as every station's default, so a
+    config that simply omitted them published somebody else's location
+    without a word.  ``contract.py`` already grades both as ``fail``
+    when empty; guessing here contradicted this client's own published
+    contract.  There is no safe default for where an antenna stands.
+    """
+    station = config.get('station', {}) or {}
+    missing = [k for k in ('callsign', 'grid_square')
+               if not str(station.get(k) or '').strip()]
+    if missing:
+        names = ', '.join('station.' + k for k in missing)
+        print(f"\u274c {config_path}: {names} "
+              f"{'is' if len(missing) == 1 else 'are'} missing or empty")
+        print("   GRAPE packages are named and geolocated from these — "
+              "there is no safe default for a station's identity.")
+        sys.exit(1)
+    return (str(station['callsign']).strip(),
+            str(station['grid_square']).strip())
+
+
 def _grape_sweep_retry(day: str, data_root, config_path) -> None:
     """Re-invoke this CLI for one backfill day.  Never fatal.
 
@@ -318,9 +347,7 @@ def main():
             with open(config_path, 'r') as f:
                 config = toml.load(f)
 
-            station = config.get('station', {})
-            callsign = station.get('callsign', 'AC0G')
-            grid = station.get('grid_square', 'EM38ww')
+            callsign, grid = _station_identity(config, config_path)
 
             # Use canonical 9 GRAPE channels — not dir scanning which picks up
             # legacy aliases (BPM_10000, WWV_10000, WWVH_10000, etc.)
