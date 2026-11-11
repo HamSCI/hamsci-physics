@@ -172,3 +172,53 @@ def test_codec_copy_matches_hf_timestd():
     np.testing.assert_array_equal(decoded, VECTOR_DECODED)
     with pytest.raises(ValueError):
         decode_iq(VECTOR_BYTES, "complex-f8")
+
+
+def _orphan_minute(tmp_path, sidecar):
+    """One 60 s F16 chunk; ``sidecar`` None writes no JSON at all."""
+    day_dir = tmp_path / "raw_buffer" / CHANNEL / DAY
+    day_dir.mkdir(parents=True)
+    _write_chunk(day_dir, T0, _tone(RATE * 60, 1.0), "f16")
+    if sidecar is None:
+        (day_dir / f"{T0}.json").unlink()
+    else:
+        (day_dir / f"{T0}.json").write_text(json.dumps(sidecar))
+    return day_dir
+
+
+def _warnings(caplog):
+    return [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_zst_without_sidecar_counts_as_missing(tmp_path, caplog):
+    """No sidecar means no dtype: complex64 would reinterpret half-floats."""
+    day_dir = _orphan_minute(tmp_path, None)
+    reader = _reader(tmp_path)
+    with caplog.at_level("WARNING"):
+        assert reader.get_available_minutes(DAY) == []
+        assert reader.read_minute(T0) == (None, None)
+        assert reader.read_minute(T0) == (None, None)
+        samples, _ = reader._try_read_file(day_dir, str(T0))
+    assert samples is None
+    sidecar_warnings = [m for m in _warnings(caplog) if "sidecar" in m]
+    assert len(sidecar_warnings) == 1
+
+
+def test_f16_sidecar_without_scale_counts_as_missing(tmp_path, caplog):
+    meta = _sidecar(T0, 60, "complex-f16")      # no "scale"
+    day_dir = _orphan_minute(tmp_path, meta)
+    reader = _reader(tmp_path)
+    with caplog.at_level("WARNING"):
+        assert reader.get_available_minutes(DAY) == []
+        assert reader.read_minute(T0) == (None, None)
+        samples, _ = reader._try_read_file(day_dir, str(T0))
+    assert samples is None
+    assert len([m for m in _warnings(caplog) if "scale" in m]) == 1
+
+
+def test_codec_copy_decode_f32_is_zero_copy():
+    x = VECTOR_DECODED.copy()
+    raw = x.tobytes()
+    got = decode_iq(raw, "complex64")
+    assert np.shares_memory(got, np.frombuffer(raw, dtype=np.uint8))
+    np.testing.assert_array_equal(got, x)

@@ -9,7 +9,7 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Tuple, Generator
 
-from hamsci_physics.grape.iq_codec import DTYPE_F32, decode_iq
+from hamsci_physics.grape.iq_codec import DTYPE_F16, DTYPE_F32, decode_iq
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +136,30 @@ class RawBinaryReader:
 
         return sorted(list(minutes))
 
+    @staticmethod
+    def _zst_unreadable_reason(metadata: Optional[Dict]) -> Optional[str]:
+        """Why a .bin.zst with this sidecar cannot be decoded, or None.
+
+        Only the sidecar names a .bin.zst chunk's dtype.  Without one, or
+        with a complex-f16 sidecar that lacks its scale, decoding would
+        guess, and a guess of complex64 reinterprets half-floats.
+        """
+        if metadata is None:
+            return "has no readable JSON sidecar"
+        if metadata.get('dtype', DTYPE_F32) == DTYPE_F16 and 'scale' not in metadata:
+            return "has a complex-f16 sidecar without 'scale'"
+        return None
+
+    def _read_sidecar(self, day_dir: Path, stem: str) -> Optional[Dict]:
+        json_path = day_dir / f"{stem}.json"
+        if not json_path.exists():
+            return None
+        try:
+            with open(json_path, 'r') as f:
+                return json.load(f)
+        except Exception:
+            return None
+
     def _get_file_duration(self, day_dir: Path, stem: str) -> int:
         """Return file_duration_sec from JSON sidecar, defaulting to 60 (legacy)."""
         json_path = day_dir / f"{stem}.json"
@@ -180,6 +204,13 @@ class RawBinaryReader:
             if not stem.isdigit():
                 continue
             chunk_ts = int(stem)
+            if name.endswith('.bin.zst'):
+                why = self._zst_unreadable_reason(self._read_sidecar(day_dir, stem))
+                if why is not None:
+                    # Counts as missing (a gap), warned once: the index
+                    # is cached per directory.
+                    logger.warning(f"chunk {f} {why}; treating it as missing")
+                    continue
             dur = self._get_file_duration(day_dir, stem)
             if dur <= 0 or dur % 60 != 0:
                 logger.warning(
@@ -313,20 +344,23 @@ class RawBinaryReader:
         # Try zstd compressed .bin.zst
         if samples is None:
             zst_path = day_dir / f"{base_name}.bin.zst"
-            if zst_path.exists():
+            why = self._zst_unreadable_reason(metadata)
+            if zst_path.exists() and why is not None:
+                # The chunk index already warned and skipped this file.
+                logger.debug(f"not decoding {zst_path}: it {why}")
+            elif zst_path.exists():
                 try:
                     import zstandard as zstd
                     with open(zst_path, 'rb') as f:
                         dctx = zstd.ZstdDecompressor()
                         data = dctx.decompress(f.read())
                         # F16 chunks name their dtype and scale in the
-                        # sidecar; no sidecar or no dtype means complex64.
-                        meta = metadata or {}
+                        # sidecar; a sidecar without a dtype means complex64.
                         samples = decode_iq(
                             data,
-                            meta.get('dtype', DTYPE_F32),
-                            float(meta.get('scale', 1.0)),
-                        ).copy()
+                            metadata.get('dtype', DTYPE_F32),
+                            float(metadata.get('scale', 1.0)),
+                        )
                         del data
                 except ImportError:
                     logger.warning("zstandard module not installed - cannot read .zst files")

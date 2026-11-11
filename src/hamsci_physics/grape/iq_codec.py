@@ -20,14 +20,21 @@ DTYPE_F16 = "complex-f16"
 
 
 def decode_iq(raw: bytes, dtype: str, scale: float = 1.0) -> np.ndarray:
-    """Decode raw archive bytes to complex64, dividing out ``scale``."""
+    """Decode raw archive bytes to complex64, dividing out ``scale``.
+
+    complex64 at scale 1.0 comes back as a zero-copy, read-only view of
+    ``raw``; every other case returns a fresh, writable array.
+    """
     if dtype == DTYPE_F32:
         components = np.frombuffer(raw, dtype=np.float32)
+        if scale == 1.0:
+            return components.view(np.complex64)
     elif dtype == DTYPE_F16:
         components = np.frombuffer(raw, dtype="<f2")
     else:
         raise ValueError(f"unknown I/Q dtype: {dtype!r}")
-    values = components.astype(np.float32) / np.float32(scale)
+    values = components.astype(np.float32)
+    values /= np.float32(scale)
     return values.view(np.complex64)
 
 
