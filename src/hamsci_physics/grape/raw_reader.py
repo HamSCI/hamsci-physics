@@ -9,6 +9,8 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Tuple, Generator
 
+from hamsci_physics.grape.iq_codec import DTYPE_F32, decode_iq
+
 logger = logging.getLogger(__name__)
 
 class RawBinaryReader:
@@ -288,6 +290,16 @@ class RawBinaryReader:
         """
         samples = None
 
+        # Read the sidecar first: it names the .bin.zst dtype and scale.
+        metadata = None
+        json_path = day_dir / f"{base_name}.json"
+        if json_path.exists():
+            try:
+                with open(json_path, 'r') as f:
+                    metadata = json.load(f)
+            except Exception as e:
+                logger.warning(f"Error reading metadata {json_path}: {e}")
+
         # Try uncompressed .bin
         bin_path = day_dir / f"{base_name}.bin"
         if bin_path.exists():
@@ -307,7 +319,14 @@ class RawBinaryReader:
                     with open(zst_path, 'rb') as f:
                         dctx = zstd.ZstdDecompressor()
                         data = dctx.decompress(f.read())
-                        samples = np.frombuffer(data, dtype=np.complex64).copy()
+                        # F16 chunks name their dtype and scale in the
+                        # sidecar; no sidecar or no dtype means complex64.
+                        meta = metadata or {}
+                        samples = decode_iq(
+                            data,
+                            meta.get('dtype', DTYPE_F32),
+                            float(meta.get('scale', 1.0)),
+                        ).copy()
                         del data
                 except ImportError:
                     logger.warning("zstandard module not installed - cannot read .zst files")
@@ -328,16 +347,6 @@ class RawBinaryReader:
                     logger.warning("lz4 module not installed - cannot read .lz4 files")
                 except Exception as e:
                     logger.error(f"Error reading {lz4_path}: {e}")
-
-        # Read metadata sidecar
-        metadata = None
-        json_path = day_dir / f"{base_name}.json"
-        if json_path.exists():
-            try:
-                with open(json_path, 'r') as f:
-                    metadata = json.load(f)
-            except Exception as e:
-                logger.warning(f"Error reading metadata {json_path}: {e}")
 
         return samples, metadata
 
