@@ -118,3 +118,15 @@ def test_no_second_uploader_ships():
                  "systemd/grape-upload-retry.timer",
                  "scripts/setup-psws-keys.sh"):
         assert not (ROOT / gone).exists(), gone
+
+
+def test_build_venv_step_falls_back_without_the_uv_symlink():
+    # KJ6MKI (bare metal, 2026-11-12): /opt/uv/python was empty, so a step
+    # that named only the uv symlink exited 127.  It must fall back to uv
+    # venv and then to python3.11.
+    import tomllib
+    from pathlib import Path
+    d = tomllib.loads((Path(__file__).resolve().parent.parent / "deploy.toml").read_text())
+    step = d["build"]["steps"][0]
+    assert "cpython-3.11-linux-x86_64-gnu" in step
+    assert "uv venv --seed" in step and "python3.11 -m venv" in step

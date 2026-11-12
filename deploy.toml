@@ -40,9 +40,15 @@ edit = "scripts/config-review.sh"
 # existed.  /opt/uv/python/cpython-3.11-linux-x86_64-gnu is the stable symlink
 # uv maintains onto whichever patch it currently holds, so the next patch bump
 # cannot silently break every fresh install again.
+# ⛔ That symlink exists only where uv manages a CPython (the appliance image).
+# A repo install on bare metal builds its venvs with uv on the system
+# python3.11 and leaves /opt/uv/python empty, so the step exited 127
+# (KJ6MKI, Ubuntu 22.04, 2026-11-12).  Fall back to `uv venv --seed`, which
+# finds the same python3.11 the other venvs use and needs no python3.11-venv
+# package, then to python3.11 -m venv.  sigmond runs steps through a shell.
 [build]
 steps = [
-    "/opt/uv/python/cpython-3.11-linux-x86_64-gnu/bin/python3.11 -m venv /opt/git/sigmond/hamsci-physics/venv",
+    'V=/opt/git/sigmond/hamsci-physics/venv; P=/opt/uv/python/cpython-3.11-linux-x86_64-gnu/bin/python3.11; if [ -x "$P" ]; then "$P" -m venv "$V"; elif command -v uv >/dev/null 2>&1; then uv venv --seed --allow-existing --python 3.11 "$V" 2>/dev/null || uv venv --seed --python 3.11 "$V"; else python3.11 -m venv "$V"; fi',
     "/opt/git/sigmond/hamsci-physics/venv/bin/pip install --upgrade pip setuptools wheel",
     "/opt/git/sigmond/hamsci-physics/venv/bin/pip install -e /opt/git/sigmond/hamsci-dsp",
     "/opt/git/sigmond/hamsci-physics/venv/bin/pip install -e /opt/git/sigmond/hs-uploader",
