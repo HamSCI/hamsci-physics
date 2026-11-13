@@ -131,6 +131,9 @@ units = [
     "grape-daily.timer",
     "hamsci-physics-reanalysis.timer",
     "hamsci-physics-ionex-download.timer",
+    # IRI's daily F10.7/Ap and monthly IG12/Rz12 indices.  Listed 2026-11-13: until then the timer
+    # was only linked, never enabled, and IRI ran on climatology on every station.
+    "hamsci-physics-iri-update.timer",
     # No upload unit: hs-uploader.service ships GRAPE (and retries).  The
     # retired grape-upload-retry units and `grape upload` were removed
     # 2026-10-01.
