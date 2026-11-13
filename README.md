@@ -10,12 +10,18 @@ here:
 
 | Product | Module | Unit |
 |---|---|---|
-| L3 TEC / dTEC fusion | `physics_fusion_service` | `hamsci-physics-fusion.service` (held — see below) |
+| L3 TEC / dTEC fusion | `physics_fusion_service` | `hamsci-physics-fusion.service` |
 | Daily reanalysis of arrivals | `ionospheric_reanalysis` | `hamsci-physics-reanalysis.timer` |
 | Travelling ionospheric disturbances | `tid_detector` | (in-process, fusion) |
 | Per-path propagation statistics | `propagation_stats` | (in-process, reanalysis) |
 | GRAPE / PSWS daily datasets | `grape/` | `grape-daily.timer` |
 | IONEX / IRI / space-weather inputs | `cddis`, `scripts/` | `hamsci-physics-ionex-download.timer`, `…-iri-update.timer` |
+
+`hamsci-physics-iri-update.timer` runs daily, and sigmond enables it with the
+other units. It refreshes the IRI index files (`apf107.dat`, `ig_rz.dat`)
+only in PHaRLAP's copy, `/opt/pharlap_4.7.4/dat/iri2020`. It leaves the
+`iri2020` Python package's copy alone: that package's Fortran segfaults on
+current index files.
 
 ## Where the boundary is
 
@@ -73,6 +79,9 @@ hamsci-physics grape daily         # decimate → spectrogram → package → up
 All three products are live. The L3 fusion service runs continuously —
 on AC0G/B4 it writes about 14 carrier-phase dTEC records a minute, plus
 differential dTEC across WWV, WWVH and BPM, anchored to GNSS VTEC.
+
+GRAPE reads hf-timestd's raw archive in either sample format, `complex64`
+or the trial `f16`.
 
 One known wart, inherited from the HDF5→SQLite migration: the service's
 upstream-freshness check and channel discovery still read the old
