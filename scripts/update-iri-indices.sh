@@ -49,6 +49,7 @@ if [ ${#DAT_DIRS[@]} -eq 0 ]; then
     exit 0
 fi
 WORK=$(mktemp -d)
+chmod 0755 "$WORK"   # each directory owner reads the download from here
 trap 'rm -rf "$WORK"' EXIT
 
 fetch_file() {
@@ -73,13 +74,27 @@ fetch_file() {
             local last
             last=$(tail -1 "$tmp" | tr -s ' ' | head -c 60)
             echo "  ok: $size bytes, last line: $last"
-            # Install into every directory, each by a rename beside the target, so
-            # a reader never sees half a file; mode 0644 so every user reads it.
-            local d
+            # Install into every directory, each by a rename beside the target, so a
+            # reader never sees half a file, mode 0644 so every user reads it.  The
+            # venv directories belong to sigmond while this runs as root, so each is
+            # written AS ITS OWNER, through a random mktemp name, and a directory that
+            # is itself a symlink is skipped: root never writes through a path its
+            # owner could have planted.
+            chmod 0644 "$tmp"
+            local d owner
             for d in "${DAT_DIRS[@]}"; do
-                local next="$d/.$fname.new"
-                cp "$tmp" "$next" && chmod 0644 "$next" && mv "$next" "$d/$fname" \
-                    && echo "  installed $d/$fname" || echo "  FAILED to install $d/$fname"
+                if [ -L "$d" ] || [ ! -d "$d" ]; then
+                    echo "  skipped $d (not a plain directory)"; continue
+                fi
+                owner=$(stat -c %U "$d")
+                local as=()
+                [ "$(id -u)" -eq 0 ] && [ "$owner" != root ] && as=(setpriv --reuid "$owner" --regid "$(stat -c %G "$d")" --init-groups --)
+                if "${as[@]}" sh -c 'n=$(mktemp "$1/.$2.XXXXXX") && cat "$3" > "$n" && chmod 0644 "$n" && mv -T "$n" "$1/$2"' \
+                        _ "$d" "$fname" "$tmp"; then
+                    echo "  installed $d/$fname"
+                else
+                    echo "  FAILED to install $d/$fname"
+                fi
             done
             return 0
         fi

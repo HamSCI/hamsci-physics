@@ -52,6 +52,17 @@ def test_a_short_answer_falls_through_to_the_next_source(tmp_path):
     assert (d / "apf107.dat").read_text().splitlines()[-1] == "26 11 12 fallback"
 
 
+def test_a_symlinked_directory_is_skipped(tmp_path):
+    src = _source(tmp_path / "src", "26 11 12 fresh")
+    real = _stale(tmp_path / "real")
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    r = _run(tmp_path, [src], [link])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "skipped" in r.stdout
+    assert (real / "apf107.dat").read_text() == "23  6 29 stale\n"
+
+
 def test_when_every_source_fails_the_old_files_stay(tmp_path):
     d = _stale(tmp_path / "pkg")
     r = _run(tmp_path, [tmp_path / "missing"], [d])
