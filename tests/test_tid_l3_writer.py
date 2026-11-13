@@ -151,16 +151,6 @@ class TestTidWriterReaderRoundtrip(unittest.TestCase):
             self.assertEqual(got['n_paths_correlated'], 4)
             self.assertEqual(got['leading_path'], 'WWV_10.0')
 
-    @unittest.skip(
-        "Pre-existing SQLite-writer gap: Python's sqlite3 binding coerces "
-        "Python float('nan') to NULL on INSERT, so a required+allow_nan "
-        "float field (velocity_m_s / direction_deg) fails the NOT NULL "
-        "constraint that _ensure_table emits from required: true.  "
-        "Producer side must emit None (not NaN); schema needs "
-        "required: false on these fields, or the writer needs to "
-        "auto-relax NOT NULL when allow_nan is true.  Not a Phase-4 "
-        "regression — masked previously by the HDF5 fallback writer."
-    )
     def test_writer_accepts_nan_velocity_direction(self):
         """When the detector cannot resolve a TDOA velocity it emits
         NaN; the schema's allow_nan must let the write succeed."""
