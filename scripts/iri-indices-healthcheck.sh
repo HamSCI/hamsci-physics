@@ -4,7 +4,7 @@
 # its job. Exits non-zero on any failure so that systemd's
 # OnFailure=timestd-alert@%n.service triggers the alert pipeline.
 #
-# Run via systemd timer (timestd-iri-healthcheck.timer), weekly, after the
+# Run via systemd timer (hamsci-physics-iri-healthcheck.timer), weekly, after the
 # update timer has had time to finish.
 #
 # Checks:

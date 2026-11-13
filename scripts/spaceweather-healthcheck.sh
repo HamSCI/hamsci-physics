@@ -5,7 +5,7 @@
 # reachable. Exits non-zero on failure so systemd's
 # OnFailure=timestd-alert@%n.service triggers the alert pipeline.
 #
-# Unlike the IRI indices (a weekly systemd timer), space weather is fetched
+# Unlike the IRI indices (a daily update timer, a weekly health check), space weather is fetched
 # in-process by SpaceWeatherService (started by the metrology service), which
 # writes a JSON snapshot to the iono cache on every refresh. This check
 # therefore verifies:
