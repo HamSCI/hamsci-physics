@@ -107,10 +107,16 @@ fetch_file() {
                             # first component under /opt/git/sigmond: hf-timestd's venv belongs to
                             # timestd on some stations, sigmond on others), never root, whatever
                             # the leaf says.
-                            local top="/opt/git/sigmond/$(cut -d/ -f5 <<<"$real")"
-                            [ "$(stat -c %U "$top")" = root ] && { echo "  skipped $real (repo owned by root)"; continue; }
-                            as=(setpriv --reuid "$(stat -c %U "$top")" \
-                                --regid "$(stat -c %G "$top")" --init-groups --) ;;
+                            local top="/opt/git/sigmond/$(cut -d/ -f5 <<<"$real")" ug u g
+                            if [ -L "$top" ] || [ ! -d "$top" ]; then
+                                echo "  skipped $real (repo directory not a plain directory)"; continue
+                            fi
+                            ug=$(stat -c '%U %G' "$top"); u=${ug% *}; g=${ug#* }
+                            case "$u" in
+                                sigmond|timestd) ;;     # the service accounts that own sigmond venvs
+                                *) echo "  skipped $real (repo owned by '$u', not a service account)"; continue ;;
+                            esac
+                            as=(setpriv --reuid "$u" --regid "$g" --init-groups --) ;;
                         /opt/pharlap_4.7.4/dat/iri2020)
                             if [ -n "$(find /opt/pharlap_4.7.4 /opt/pharlap_4.7.4/dat "$real" -maxdepth 0 \( ! -user root -o -perm /022 \))" ]; then
                                 echo "  skipped $real (writable by someone other than root)"; continue
@@ -119,7 +125,9 @@ fetch_file() {
                             echo "  skipped $real (outside the expected trees)"; continue ;;
                     esac
                 fi
-                if "${as[@]}" sh -c 'n=$(mktemp "$1/.$2.XXXXXX") && install -m 0644 "$3" "$n" && mv -T "$n" "$1/$2"' \
+                # Inside the (dropped) shell: enter the directory physically and confirm it is still
+                # the one resolved above before writing, so a rename in between writes nowhere.
+                if "${as[@]}" sh -c 'cd -P -- "$1" && [ "$(pwd -P)" = "$1" ] && n=$(mktemp "./.$2.XXXXXX") && install -m 0644 "$3" "$n" && mv -T "$n" "./$2"' \
                         _ "$real" "$fname" "$tmp"; then
                     echo "  installed $real/$fname"
                 else
