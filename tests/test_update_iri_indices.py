@@ -14,6 +14,11 @@ def _run(tmp_path, sources, dirs):
     return subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True, text=True)
 
 
+def _today():
+    import time
+    return time.strftime("%y %m %d", time.gmtime())
+
+
 def _source(path, last_line):
     path.mkdir()
     for name in ("apf107.dat", "ig_rz.dat"):
@@ -29,13 +34,13 @@ def _stale(path):
 
 
 def test_every_directory_gets_the_fresh_files(tmp_path):
-    src = _source(tmp_path / "src", "26 11 12 fresh")
+    src = _source(tmp_path / "src", _today() + " fresh")
     pharlap, package = _stale(tmp_path / "pharlap"), _stale(tmp_path / "pkg")
     r = _run(tmp_path, [src], [pharlap, package])
     assert r.returncode == 0, r.stdout + r.stderr
     for d in (pharlap, package):
         for name in ("apf107.dat", "ig_rz.dat"):
-            assert (d / name).read_text().splitlines()[-1] == "26 11 12 fresh"
+            assert (d / name).read_text().splitlines()[-1].endswith(" fresh")
             assert oct((d / name).stat().st_mode & 0o777) == "0o644"
         assert not list(d.glob(".*.new"))
 
@@ -45,15 +50,26 @@ def test_a_short_answer_falls_through_to_the_next_source(tmp_path):
     bad.mkdir()
     for name in ("apf107.dat", "ig_rz.dat"):
         (bad / name).write_text("404\n")
-    good = _source(tmp_path / "good", "26 11 12 fallback")
+    good = _source(tmp_path / "good", _today() + " fallback")
     d = _stale(tmp_path / "pkg")
     r = _run(tmp_path, [bad, good], [d])
     assert r.returncode == 0, r.stdout + r.stderr
-    assert (d / "apf107.dat").read_text().splitlines()[-1] == "26 11 12 fallback"
+    assert (d / "apf107.dat").read_text().splitlines()[-1].endswith(" fallback")
+
+
+def test_a_stale_mirror_loses_to_the_next_source(tmp_path):
+    # KFS-OMNI, 2026-11-13: the primary mirror served an apf107.dat ending 2026-07-28.
+    stale = _source(tmp_path / "stale", "26  7 28 old mirror")
+    fresh = _source(tmp_path / "fresh", _today() + " fresh")
+    d = _stale(tmp_path / "pkg")
+    r = _run(tmp_path, [stale, fresh], [d])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "days old" in r.stdout
+    assert (d / "apf107.dat").read_text().splitlines()[-1].endswith("fresh")
 
 
 def test_a_symlinked_directory_is_skipped(tmp_path):
-    src = _source(tmp_path / "src", "26 11 12 fresh")
+    src = _source(tmp_path / "src", _today() + " fresh")
     real = _stale(tmp_path / "real")
     link = tmp_path / "link"
     link.symlink_to(real)

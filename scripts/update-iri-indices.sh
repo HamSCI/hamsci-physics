@@ -71,6 +71,18 @@ fetch_file() {
                 echo "  rejected: $url last line has no digits"
                 continue
             fi
+            # apf107.dat's lines start "YY MM DD": a mirror can serve a months-old copy (KFS-OMNI got
+            # one ending 2026-07-28 on 11-13), so a copy older than IRI_MAX_AGE_DAYS loses to the
+            # next source.
+            if [ "$fname" = apf107.dat ]; then
+                local ymd age
+                ymd=$(tail -1 "$tmp" | awk '{printf "20%02d-%02d-%02d", $1, $2, $3}')
+                age=$(( ( $(date -u +%s) - $(date -u -d "$ymd" +%s 2>/dev/null || echo 0) ) / 86400 ))
+                if [ "$age" -gt "${IRI_MAX_AGE_DAYS:-10}" ]; then
+                    echo "  rejected: $url ends $ymd ($age days old)"
+                    continue
+                fi
+            fi
             local last
             last=$(tail -1 "$tmp" | tr -s ' ' | head -c 60)
             echo "  ok: $size bytes, last line: $last"
@@ -90,10 +102,15 @@ fetch_file() {
                 as=()
                 if [ "$(id -u)" -eq 0 ] && [ -z "${IRI_DAT_DIRS:-}" ]; then
                     case "$real" in
-                        /opt/git/sigmond/*)
-                            # Always as the tree's owner, never root, whatever the leaf says.
-                            as=(setpriv --reuid "$(stat -c %U /opt/git/sigmond)" \
-                                --regid "$(stat -c %G /opt/git/sigmond)" --init-groups --) ;;
+                        /opt/git/sigmond/?*/*)
+                            # As the owner of the repository directory the path sits in (its
+                            # first component under /opt/git/sigmond: hf-timestd's venv belongs to
+                            # timestd on some stations, sigmond on others), never root, whatever
+                            # the leaf says.
+                            local top="/opt/git/sigmond/$(cut -d/ -f5 <<<"$real")"
+                            [ "$(stat -c %U "$top")" = root ] && { echo "  skipped $real (repo owned by root)"; continue; }
+                            as=(setpriv --reuid "$(stat -c %U "$top")" \
+                                --regid "$(stat -c %G "$top")" --init-groups --) ;;
                         /opt/pharlap_4.7.4/dat/iri2020)
                             if [ -n "$(find /opt/pharlap_4.7.4 /opt/pharlap_4.7.4/dat "$real" -maxdepth 0 \( ! -user root -o -perm /022 \))" ]; then
                                 echo "  skipped $real (writable by someone other than root)"; continue
