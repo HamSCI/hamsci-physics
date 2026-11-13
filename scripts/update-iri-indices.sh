@@ -75,25 +75,38 @@ fetch_file() {
             last=$(tail -1 "$tmp" | tr -s ' ' | head -c 60)
             echo "  ok: $size bytes, last line: $last"
             # Install into every directory, each by a rename beside the target, so a
-            # reader never sees half a file, mode 0644 so every user reads it.  The
-            # venv directories belong to sigmond while this runs as root, so each is
-            # written AS ITS OWNER, through a random mktemp name, and a directory that
-            # is itself a symlink is skipped: root never writes through a path its
-            # owner could have planted.
+            # reader never sees half a file, mode 0644 so every user reads it.  This
+            # runs as root and the venv trees belong to sigmond, so under
+            # /opt/git/sigmond every write runs as that tree's owner, never root;
+            # root writes only PHaRLAP's exact directory, and only when nobody else
+            # can write to it.  Paths are resolved first; anything else is skipped.
+            # (Overrides in IRI_DAT_DIRS are for tests, run unprivileged.)
             chmod 0644 "$tmp"
-            local d owner
+            local d real as
             for d in "${DAT_DIRS[@]}"; do
-                if [ -L "$d" ] || [ ! -d "$d" ]; then
+                if [ -L "$d" ] || ! real=$(realpath -e -- "$d" 2>/dev/null) || [ ! -d "$real" ]; then
                     echo "  skipped $d (not a plain directory)"; continue
                 fi
-                owner=$(stat -c %U "$d")
-                local as=()
-                [ "$(id -u)" -eq 0 ] && [ "$owner" != root ] && as=(setpriv --reuid "$owner" --regid "$(stat -c %G "$d")" --init-groups --)
-                if "${as[@]}" sh -c 'n=$(mktemp "$1/.$2.XXXXXX") && cat "$3" > "$n" && chmod 0644 "$n" && mv -T "$n" "$1/$2"' \
-                        _ "$d" "$fname" "$tmp"; then
-                    echo "  installed $d/$fname"
+                as=()
+                if [ "$(id -u)" -eq 0 ] && [ -z "${IRI_DAT_DIRS:-}" ]; then
+                    case "$real" in
+                        /opt/git/sigmond/*)
+                            # Always as the tree's owner, never root, whatever the leaf says.
+                            as=(setpriv --reuid "$(stat -c %U /opt/git/sigmond)" \
+                                --regid "$(stat -c %G /opt/git/sigmond)" --init-groups --) ;;
+                        /opt/pharlap_4.7.4/dat/iri2020)
+                            if [ -n "$(find /opt/pharlap_4.7.4 /opt/pharlap_4.7.4/dat "$real" -maxdepth 0 \( ! -user root -o -perm /022 \))" ]; then
+                                echo "  skipped $real (writable by someone other than root)"; continue
+                            fi ;;
+                        *)
+                            echo "  skipped $real (outside the expected trees)"; continue ;;
+                    esac
+                fi
+                if "${as[@]}" sh -c 'n=$(mktemp "$1/.$2.XXXXXX") && install -m 0644 "$3" "$n" && mv -T "$n" "$1/$2"' \
+                        _ "$real" "$fname" "$tmp"; then
+                    echo "  installed $real/$fname"
                 else
-                    echo "  FAILED to install $d/$fname"
+                    echo "  FAILED to install $real/$fname"
                 fi
             done
             return 0
