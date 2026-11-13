@@ -11,14 +11,12 @@
 # Run via systemd timer (hamsci-physics-iri-update.timer), daily. Output goes
 # to the systemd journal.
 #
-# Files refreshed, in EVERY IRI data directory present:
+# Files refreshed:
 #   apf107.dat   (daily F10.7 + Ap)
 #   ig_rz.dat    (monthly IG12 + Rz12)
-# in PHaRLAP's /opt/pharlap_4.7.4/dat/iri2020 where PHaRLAP is installed, and
-# in each sigmond venv's iri2020 package (site-packages/iri2020/data), which
-# is the copy hf-timestd's IRI actually reads on most stations.  Until
-# 2026-11-13 only PHaRLAP's copy was refreshed, the timer was never enabled,
-# and B4's package copy ended 2023-06-29: IRI ran on climatology fleet-wide.
+# in PHaRLAP's /opt/pharlap_4.7.4/dat/iri2020 where PHaRLAP is installed.
+# hf-timestd's IRI reads the iri2020 package's own copy, which still ends
+# 2023-06-29, and it can't take current files yet (see the discovery below).
 #
 # IRI_DAT_DIRS (space-separated) and IRI_SOURCES override discovery and the
 # download sources, for tests.
@@ -40,9 +38,10 @@ if [ -n "${IRI_DAT_DIRS:-}" ]; then
 else
     DAT_DIRS=()
     [ -d /opt/pharlap_4.7.4/dat/iri2020 ] && DAT_DIRS+=(/opt/pharlap_4.7.4/dat/iri2020)
-    for d in /opt/git/sigmond/*/venv/lib/python3*/site-packages/iri2020/data; do
-        [ -f "$d/apf107.dat" ] && DAT_DIRS+=("$d")
-    done
+    # NOT the iri2020 Python package's copy (site-packages/iri2020/data): its Fortran driver
+    # segfaults on the current index files.  Installed fleet-wide 2026-11-13 02:05Z, it crashed
+    # hf-timestd's L2 calibration thousands of times an hour and starved hamsci-physics; restored
+    # to the package's own files at 03:00Z.  Refresh that copy only once its reader is understood.
 fi
 if [ ${#DAT_DIRS[@]} -eq 0 ]; then
     echo "No IRI data directory found (no PHaRLAP, no iri2020 package); nothing to update."
