@@ -103,18 +103,13 @@ fetch_file() {
                 if [ "$(id -u)" -eq 0 ] && [ -z "${IRI_DAT_DIRS:-}" ]; then
                     case "$real" in
                         /opt/git/sigmond/?*/*)
-                            # As the owner of the repository directory the path sits in (its
-                            # first component under /opt/git/sigmond: hf-timestd's venv belongs to
-                            # timestd on some stations, sigmond on others), never root, whatever
-                            # the leaf says.
-                            local top="/opt/git/sigmond/$(cut -d/ -f5 <<<"$real")" ug u g
-                            if [ -L "$top" ] || [ ! -d "$top" ]; then
-                                echo "  skipped $real (repo directory not a plain directory)"; continue
-                            fi
-                            ug=$(stat -c '%U %G' "$top"); u=${ug% *}; g=${ug#* }
+                            # As the data directory's own owner (B2: the repo is sigmond's, its
+                            # venv timestd's, mode 2755), but only a service account.
+                            local ug u g
+                            ug=$(stat -c '%U %G' "$real"); u=${ug% *}; g=${ug#* }
                             case "$u" in
                                 sigmond|timestd) ;;     # the service accounts that own sigmond venvs
-                                *) echo "  skipped $real (repo owned by '$u', not a service account)"; continue ;;
+                                *) echo "  skipped $real (owned by '$u', not a service account)"; continue ;;
                             esac
                             as=(setpriv --reuid "$u" --regid "$g" --init-groups --) ;;
                         /opt/pharlap_4.7.4/dat/iri2020)
