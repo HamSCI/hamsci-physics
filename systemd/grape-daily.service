@@ -22,6 +22,14 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=grape-daily
 
+# Run at lowest priority to avoid interfering with real-time services.
+# CPUWeight=idle puts the cgroup in cpu.idle: it runs only on CPU the
+# recorders leave unused (AB4EJ 2026-11-20: at normal priority it carried
+# 21 % of the station's CPU pressure while FT8 decodes queued behind it).
+Nice=19
+CPUWeight=idle
+IOSchedulingClass=idle
+
 # Resource limits (optional)
 CPUQuota=50%
 MemoryMax=6G
