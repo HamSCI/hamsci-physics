@@ -9,6 +9,7 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Tuple, Generator
 
+from hamsci_physics.grape.chunk_segments import SegmentJoiner, parse_chunk_name
 from hamsci_physics.grape.iq_codec import DTYPE_F16, DTYPE_F32, decode_iq
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,12 @@ class RawBinaryReader:
               correct 1-minute slice.
 
     Supports .bin (raw), .bin.zst (zstd compressed), and .bin.lz4 (lz4 compressed).
+
+    A chunk reopened at its boundary (a recorder restart mid-chunk) has
+    later segments, ``{chunk_ts}.seg<N>.bin*``, in any of the search
+    directories.  ``read_minute`` joins every segment it finds by position
+    (``chunk_segments.join_segments``); the minutes written after the
+    restart used to read as gaps.
     """
 
     def __init__(self, data_root: Path, channel_name: str,
@@ -76,6 +83,8 @@ class RawBinaryReader:
         # The index is authoritative because it learns the duration from
         # each chunk's own JSON sidecar.
         self._chunk_index_cache: Dict[Path, Dict[int, Tuple[str, int]]] = {}
+        # {day_dir: {chunk_ts: [(segment, file_stem), ...]}}, from the same scan.
+        self._segment_cache: Dict[Path, Dict[int, List[Tuple[int, str]]]] = {}
 
         logger.debug(f"RawBinaryReader initialized for {channel_name}, "
                      f"search dirs: {[str(d) for d in self._search_dirs]}")
@@ -192,18 +201,21 @@ class RawBinaryReader:
             return cached
 
         index: Dict[int, Tuple[str, int]] = {}
+        segments: Dict[int, List[Tuple[int, str]]] = {}
+        self._segment_cache[day_dir] = segments
         if not day_dir.exists():
             self._chunk_index_cache[day_dir] = index
             return index
 
+        # Segment 1 first, so the index names a chunk by its earliest file.
+        files = []
         for f in day_dir.glob('*.bin*'):
+            parsed = parse_chunk_name(f.name)
+            if parsed is not None and parsed[2] != '.json':
+                files.append((parsed[1], parsed[0], f))
+        for segment, chunk_ts, f in sorted(files):
             name = f.name
-            if '.bin' not in name:
-                continue
             stem = name.split('.bin')[0]
-            if not stem.isdigit():
-                continue
-            chunk_ts = int(stem)
             if name.endswith('.bin.zst'):
                 why = self._zst_unreadable_reason(self._read_sidecar(day_dir, stem))
                 if why is not None:
@@ -218,12 +230,14 @@ class RawBinaryReader:
                     f"skipping"
                 )
                 continue
+            if (segment, stem) not in segments.setdefault(chunk_ts, []):
+                segments[chunk_ts].append((segment, stem))
             for offset in range(0, dur, 60):
                 minute_ts = chunk_ts + offset
                 if minute_ts in index:
                     existing_stem, _ = index[minute_ts]
-                    if existing_stem == stem:
-                        continue  # same chunk seen via .bin and .bin.zst
+                    if existing_stem.split('.seg')[0] == str(chunk_ts):
+                        continue  # same chunk: another format or a later segment
                     logger.warning(
                         f"duplicate chunk for minute {minute_ts}: "
                         f"{existing_stem} vs {stem} in {day_dir} "
@@ -270,7 +284,8 @@ class RawBinaryReader:
                     continue
 
                 stem, offset_sec = entry
-                chunk_samples, chunk_meta = self._try_read_file(day_dir, stem)
+                chunk_samples, chunk_meta = self._read_joined(
+                    int(stem.split('.seg')[0]), candidate_dates)
                 if chunk_samples is None:
                     # Index pointed at a file we couldn't actually read
                     # (corruption, vanished mid-run, etc.).  Try the next
@@ -309,6 +324,32 @@ class RawBinaryReader:
             f"no chunk covering minute {minute_timestamp} for {self.channel_name}"
         )
         return None, None
+
+    def _read_joined(self, chunk_ts: int, candidate_dates: List[str]
+                     ) -> Tuple[Optional[np.ndarray], Optional[Dict]]:
+        """Every readable segment of the chunk at ``chunk_ts``, joined.
+
+        Searches every search directory, hot first: the first file and a
+        later segment can sit in different tiers.  A segment found in two
+        directories is read from the first that decodes."""
+        found = {}
+        for search_dir in self._search_dirs:
+            for date_candidate in candidate_dates:
+                day_dir = search_dir / date_candidate
+                self._chunk_index_for(day_dir)
+                for segment, stem in self._segment_cache.get(day_dir, {}).get(chunk_ts, []):
+                    found.setdefault(segment, []).append((day_dir, stem))
+        # One segment decoded at a time: the joiner holds the joined chunk
+        # (115 MB at 24 kHz for 10 minutes) and the segment being added.
+        joiner = SegmentJoiner()
+        for segment in sorted(found):
+            for day_dir, stem in found[segment]:
+                samples, meta = self._try_read_file(day_dir, stem)
+                if samples is not None:
+                    joiner.add(segment, samples, meta)
+                    del samples
+                    break
+        return joiner.result()
 
     def _try_read_file(self, day_dir: Path, base_name: str) -> Tuple[Optional[np.ndarray], Optional[Dict]]:
         """Try to read a binary file and its JSON sidecar from day_dir.
