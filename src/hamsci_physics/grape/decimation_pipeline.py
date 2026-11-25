@@ -82,17 +82,19 @@ def _neighbour_minute(reader, minute_ts: int, epoch: Optional[str],
     equals ``epoch`` (two ``None``s count as equal).  No filter history
     may span a re-based counter (MEASUREMENT_MODEL §3), and a short or
     padded minute would put zeros, not signal, into the filters.
+    The borrow is optional: any fault in reading the minute or its
+    sidecar returns None, and the caller runs that edge unprimed.
     """
     try:
         samples, meta = reader.read_minute(minute_ts)
+        if samples is None or len(samples) != expected:
+            return None
+        if timing_state_from_sidecar(meta).counter_epoch_id != epoch:
+            return None
+        return np.asarray(samples, dtype=np.complex64)
     except Exception as e:
-        logger.warning(f"neighbour minute {minute_ts} unreadable: {e}")
+        logger.warning(f"neighbour minute {minute_ts} unusable, edge runs unprimed: {e}")
         return None
-    if samples is None or len(samples) != expected:
-        return None
-    if timing_state_from_sidecar(meta).counter_epoch_id != epoch:
-        return None
-    return np.asarray(samples, dtype=np.complex64)
 
 class DecimationPipeline:
     """
@@ -180,16 +182,35 @@ class DecimationPipeline:
         epoch: the minute before midnight primes the first stream, and the
         minute after the day feeds the last flush.  A minute whose filters
         ran into zeros (beside a gap, a failure, an epoch change, or an
-        unborrowed day edge) carries ``filter_edge = True``.
+        unborrowed day edge) carries ``filter_edge = True``.  So does a
+        short minute the pipeline pads with zeros, and the minute after it,
+        which the filters' 3.1 s reach still touches.
 
-        A re-run discards the day's earlier files first, so no minute from
-        an older run survives beside the new ones.
+        The pipeline builds the day aside, in the buffer's staging
+        directory, and replaces the day's .bin and _meta.json only after
+        the build and its metadata flush succeed.  The replacement holds
+        only the new run's minutes, so no minute from an older run survives
+        beside them.  A fault during the build leaves the old product as it
+        was.  The pipeline also keeps the old product, and logs an error,
+        when the raw data yields no minute or fewer valid minutes than the
+        old product holds: the sweep re-runs days whose raw data has been
+        evicted, wholly or in part, and a partial rebuild must not replace
+        a fuller product.
         """
         logger.info(f"Starting {channel_name} for {date_str}")
 
         reader = RawBinaryReader(self.data_root, channel_name)
-        output_buffer = DecimatedBuffer(self.data_root, channel_name)
+        day_buffer = DecimatedBuffer(self.data_root, channel_name)
+        output_buffer = day_buffer.open_staging(date_str)
+        try:
+            self._build_channel_day(date_str, channel_name, reader, output_buffer,
+                                    day_buffer)
+        finally:
+            day_buffer.discard_staging(date_str)
 
+    def _build_channel_day(self, date_str, channel_name, reader, output_buffer,
+                           day_buffer):
+        """Build the day into output_buffer (staged); commit it if it earns it."""
         input_rate = reader.get_sample_rate(date_str)
         logger.info(f"  Input rate: {input_rate} Hz")
 
@@ -202,7 +223,6 @@ class DecimationPipeline:
         day_start_dt = _dt.strptime(date_str, '%Y%m%d').replace(tzinfo=_tz.utc)
         day_start_ts = int(day_start_dt.timestamp())
 
-        output_buffer.discard_day(date_str)
         out = np.zeros(1440 * SAMPLES_PER_MINUTE, dtype=np.complex64)
         rows = {}               # minute index -> row for write_minute
         record = None           # the decimator's describe(), for the day
@@ -213,6 +233,7 @@ class DecimationPipeline:
         cursor = 0              # next output's index in `out`
         last_good = None        # last minute the stream processed cleanly
         edge_start = False
+        padded_last = False     # the stream's previous minute was zero-padded
 
         def put(y, end):
             """Write y at the cursor, never past sample `end`."""
@@ -243,6 +264,7 @@ class DecimationPipeline:
             minute_ts = day_start_ts + minute_index * 60
             samples, meta = None, None
             gap_info = 0
+            padded_now = 0          # zeros the pipeline appended to this minute
 
             if minute_ts in available_minutes:
                 samples, meta = reader.read_minute(minute_ts)
@@ -254,6 +276,7 @@ class DecimationPipeline:
                         padded = np.zeros(expected_raw_samples, dtype=np.complex64)
                         padded[:len(samples)] = samples
                         samples = padded
+                        padded_now = gap_info
                     elif len(samples) > expected_raw_samples:
                         samples = samples[:expected_raw_samples]
 
@@ -278,10 +301,17 @@ class DecimationPipeline:
                 cursor = minute_index * SAMPLES_PER_MINUTE
                 epoch = e
                 last_good = None
+                padded_last = False
                 history = (_neighbour_minute(reader, minute_ts - 60, e, expected_raw_samples)
                            if minute_index == 0 else None)
                 if history is not None:
-                    stream.prime(history)
+                    try:
+                        stream.prime(history)
+                    except Exception as exc:
+                        logger.warning(f"  {channel_name}: priming from the previous day failed "
+                                       f"({exc}); minute 0 starts unprimed and carries filter_edge")
+                        stream = StatefulDecimator(input_rate=input_rate, output_rate=10)
+                        history = None
                 edge_start = history is None
             if e:
                 epoch = e
@@ -304,9 +334,17 @@ class DecimationPipeline:
             if decimation_ratio > 0:
                 gap_info = gap_info // decimation_ratio
 
+            # Padding zeros reach the padded minute and, through the
+            # filters' 3.1 s span, the start of the minute after it.  When
+            # the minute holds less real signal than that span, they reach
+            # back into the end of the minute before it too.
+            if (padded_now and last_good == minute_index - 1
+                    and expected_raw_samples - padded_now < stream.group_delay_input_samples):
+                rows[last_good]['filter_edge'] = True
             rows[minute_index] = dict(minute_ts=minute_ts, state=state, gap_info=gap_info,
-                                      filter_edge=edge_start)
+                                      filter_edge=bool(edge_start or padded_now or padded_last))
             edge_start = False
+            padded_last = bool(padded_now)
             last_good = minute_index
             gc.collect()
 
@@ -333,11 +371,27 @@ class DecimationPipeline:
                 minutes_processed += 1
         if rows:
             output_buffer.set_decimator(date_str, record)
-
         output_buffer.flush_metadata()
-
-        del reader, output_buffer, stream, out
+        del stream, out
         gc.collect()
+
+        if day_buffer.has_day(date_str):
+            old_valid = day_buffer.valid_minutes(date_str)
+            if minutes_processed == 0:
+                logger.error(
+                    f"  {channel_name} {date_str}: no raw minute readable; keeping the "
+                    f"existing product ({old_valid} valid minutes) untouched")
+                return
+            if minutes_processed < old_valid:
+                logger.error(
+                    f"  {channel_name} {date_str}: raw data yields {minutes_processed} valid "
+                    f"minutes but the existing product holds {old_valid}; keeping the "
+                    f"existing product rather than replace it with a partial one")
+                return
+        if minutes_processed == 0:
+            logger.info(f"  {channel_name} {date_str}: no raw minute readable; nothing written")
+            return
+        day_buffer.commit_staging(date_str)
 
         logger.info(
             f"  Completed {channel_name}: {minutes_processed} valid, "

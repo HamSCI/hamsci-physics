@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import fcntl
+import shutil
 from pathlib import Path
 from datetime import datetime, timezone, date, timedelta
 from typing import Optional, Dict, Tuple, List, Any
@@ -41,6 +42,18 @@ SAMPLE_RATE = 10  # 10 Hz output
 SAMPLES_PER_MINUTE = 600  # 10 Hz × 60 seconds
 SAMPLES_PER_DAY = 864000  # 10 Hz × 86400 seconds
 BYTES_PER_SAMPLE = 8  # complex64 = 4 bytes real + 4 bytes imag
+
+
+def _fsync_dir(path: Path) -> None:
+    """Make renames in a directory durable; some filesystems refuse."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError as e:
+        logger.debug(f"Could not fsync {path}: {e}")
 
 
 @dataclass
@@ -484,6 +497,80 @@ class DecimatedBuffer:
             self._metadata_cache[date_str] = self._load_metadata(date_str)
         self._metadata_cache[date_str].decimator = record
         self._metadata_dirty.add(date_str)
+
+    # A rebuild writes the new day aside under .staging/{date}/ and moves it
+    # into place only once it is complete.  The marker says "complete":
+    # with it present, the staged files replace the day's files; without
+    # it, the staged files belong to a build that never finished.
+    COMMIT_MARKER = 'COMMIT'
+
+    def _staging_dir(self, date_str: str) -> Path:
+        return self.buffer_dir / '.staging' / date_str
+
+    def valid_minutes(self, date_str: str) -> int:
+        """Count the minutes the day's saved metadata marks valid (0 if none)."""
+        _, meta_path = self._get_paths(date_str)
+        if not meta_path.exists():
+            return 0
+        meta = self._load_metadata(date_str)
+        return sum(1 for m in meta.minutes.values() if m.get('valid', False))
+
+    def has_day(self, date_str: str) -> bool:
+        """True when either of the day's files exists."""
+        return any(p.exists() for p in self._get_paths(date_str))
+
+    def open_staging(self, date_str: str) -> 'DecimatedBuffer':
+        """A fresh buffer that writes the day aside, in the staging directory.
+
+        First finishes any commit a crash interrupted, then clears what an
+        unfinished build left behind.
+        """
+        self.recover_staging(date_str)
+        stage = self._staging_dir(date_str)
+        stage.mkdir(parents=True)
+        staged = DecimatedBuffer(self.data_root, self.channel_name)
+        staged.buffer_dir = stage
+        return staged
+
+    def recover_staging(self, date_str: str) -> None:
+        """Roll a marked commit forward; delete an unmarked staging build."""
+        stage = self._staging_dir(date_str)
+        if not stage.exists():
+            return
+        if (stage / self.COMMIT_MARKER).exists():
+            logger.warning(f"{self.channel_name} {date_str}: finishing an interrupted commit")
+            self._move_staged_into_place(date_str)
+        else:
+            shutil.rmtree(stage)
+
+    def discard_staging(self, date_str: str) -> None:
+        """Delete the day's staging build; the day's own files stay."""
+        shutil.rmtree(self._staging_dir(date_str), ignore_errors=True)
+
+    def commit_staging(self, date_str: str) -> None:
+        """Replace the day's files with the staged ones.
+
+        Call after the staged buffer's flush_metadata().  Each move is an
+        atomic rename on one filesystem.  The marker, written first, lets
+        recover_staging finish the pair if a crash falls between the two.
+        """
+        stage = self._staging_dir(date_str)
+        marker = stage / self.COMMIT_MARKER
+        with open(marker, 'w') as f:
+            f.flush()
+            os.fsync(f.fileno())
+        _fsync_dir(stage)
+        self._move_staged_into_place(date_str)
+
+    def _move_staged_into_place(self, date_str: str) -> None:
+        stage = self._staging_dir(date_str)
+        for name in (f"{date_str}.bin", f"{date_str}_meta.json"):
+            if (stage / name).exists():
+                os.replace(stage / name, self.buffer_dir / name)
+        _fsync_dir(self.buffer_dir)
+        shutil.rmtree(stage)
+        self._metadata_cache.pop(date_str, None)
+        self._metadata_dirty.discard(date_str)
 
     def discard_day(self, date_str: str) -> None:
         """Delete a day's data and metadata files and drop its cache entry."""

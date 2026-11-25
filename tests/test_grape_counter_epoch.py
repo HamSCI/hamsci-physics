@@ -95,6 +95,15 @@ def test_pipeline_resets_the_decimator_at_an_epoch_boundary(monkeypatch):
         def set_decimator(self, date_str, record): pass
 
         def discard_day(self, date_str): pass
+
+        # The pipeline builds the day aside, then commits it.
+        def open_staging(self, date_str): return self
+
+        def discard_staging(self, date_str): pass
+
+        def commit_staging(self, date_str): pass
+
+        def has_day(self, date_str): return False
     monkeypatch.setattr(dp, "RawBinaryReader", FakeReader)
     monkeypatch.setattr(dp, "DecimatedBuffer", FakeBuffer)
     dp.DecimationPipeline(Path("/nonexistent"))._process_channel_day("20260904", "SHARED_5000")
