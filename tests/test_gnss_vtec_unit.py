@@ -20,3 +20,12 @@ def test_deploy_declares_the_unit_and_its_move():
     assert d["moves"] == [{"from": ["timestd-vtec.service"], "to": "hamsci-physics-vtec.service",
                            "migrate": ["/opt/git/sigmond/hamsci-physics/venv/bin/hamsci-physics",
                                        "vtec", "adopt"]}]
+
+
+def test_hamsci_physics_ships_no_timing_inputs():
+    names = {p.name for p in (ROOT / "systemd").iterdir()}
+    for gone in ("hamsci-physics-ionex-download.timer", "hamsci-physics-iri-update.timer",
+                 "hamsci-physics-iri-healthcheck.timer", "hamsci-physics-spaceweather-healthcheck.timer"):
+        assert gone not in names, gone
+    units = tomllib.loads((ROOT / "deploy.toml").read_text())["systemd"]["units"]
+    assert not any("ionex" in u or "iri-" in u for u in units)

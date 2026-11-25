@@ -16,13 +16,10 @@ here:
 | Per-path propagation statistics | `propagation_stats` | (in-process, reanalysis) |
 | GRAPE / PSWS daily datasets | `grape/` | `grape-daily.timer` |
 | GNSS VTEC from a local receiver (from hf-timestd, v3.96) | `gnss/` | `hamsci-physics-vtec.service` |
-| IONEX / IRI / space-weather inputs | `cddis`, `scripts/` | `hamsci-physics-ionex-download.timer`, `…-iri-update.timer` |
 
-`hamsci-physics-iri-update.timer` runs daily, and sigmond enables it with the
-other units. It refreshes the IRI index files (`apf107.dat`, `ig_rz.dat`)
-only in PHaRLAP's copy, `/opt/pharlap_4.7.4/dat/iri2020`. It leaves the
-`iri2020` Python package's copy alone: that package's Fortran segfaults on
-current index files.
+hf-timestd fetches the IONEX maps and refreshes the IRI index files since v3.96,
+and `hf-timestd data sources` reports their age.  hamsci-physics keeps `cddis`
+for the VTEC service's DCB download.
 
 ## GNSS VTEC
 

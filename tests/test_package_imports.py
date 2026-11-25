@@ -49,25 +49,6 @@ def test_constants_track_the_shared_catalog():
     assert (c.E_LAYER_HEIGHT_KM, c.F_LAYER_HEIGHT_KM) == (110.0, 300.0)
 
 
-def test_ionex_script_reexports_the_canonical_parser():
-    """The standalone ionex_* scripts moved here with the CDDIS/IONEX stack.
-
-    They must keep getting IONEXParser from the shared library rather than
-    redefining it — the original defect (P-H18) was a second copy loaded by
-    importlib on every cache miss.
-    """
-    import sys
-    from pathlib import Path
-
-    from hamsci_dsp.ionosphere.ionex import IONEXParser
-
-    scripts_dir = str(Path(__file__).resolve().parents[1] / "scripts")
-    if scripts_dir not in sys.path:
-        sys.path.insert(0, scripts_dir)
-    import ionex_integration
-    assert ionex_integration.IONEXParser is IONEXParser
-
-
 def test_the_in_process_upload_modules_are_gone():
     import importlib
     for mod in ("hamsci_physics.grape.uploader", "hamsci_physics.grape.hs_upload"):
