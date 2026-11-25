@@ -15,6 +15,7 @@ here:
 | Travelling ionospheric disturbances | `tid_detector` | (in-process, fusion) |
 | Per-path propagation statistics | `propagation_stats` | (in-process, reanalysis) |
 | GRAPE / PSWS daily datasets | `grape/` | `grape-daily.timer` |
+| GNSS receiver input and VTEC estimation (from hf-timestd, v3.96) | `gnss/` | (library; hf-timestd's `timestd-vtec.service` still runs its own copy) |
 | IONEX / IRI / space-weather inputs | `cddis`, `scripts/` | `hamsci-physics-ionex-download.timer`, `…-iri-update.timer` |
 
 `hamsci-physics-iri-update.timer` runs daily, and sigmond enables it with the

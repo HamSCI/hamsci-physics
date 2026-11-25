@@ -11,6 +11,8 @@ products lives here:
 * ``propagation_stats`` — per-path propagation statistics
 * ``grape`` — the GRAPE/PSWS daily pipeline (decimate → spectrogram →
   package → upload)
+* ``gnss`` — GNSS receiver input and VTEC estimation, moved from
+  hf-timestd in v3.96
 
 Both repos consume the shared engines from ``hamsci_dsp``; this package
 never imports ``hf_timestd`` (pinned by ``tests/test_import_lint.py``).  It

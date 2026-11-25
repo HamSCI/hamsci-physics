@@ -38,6 +38,11 @@ dependencies = [
     # systemd kills it every two minutes — which is exactly what happened on
     # the first AC0G-B4 deployment (NRestarts climbing, dTEC never committing).
     "systemd-python>=235",
+    # GNSS receiver input for the VTEC service (gnss/): u-blox over USB serial
+    # and RTCM 3 receivers such as the Quectel LG290P.
+    "pyserial>=3.5",
+    "pyubx2>=1.4.1",
+    "pyrtcm>=1.2.1",     # pyubx2 1.4.1 requires it
 ]
 
 [project.optional-dependencies]
