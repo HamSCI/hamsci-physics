@@ -51,12 +51,13 @@ The daily job processes **yesterday's data** through the following pipeline:
 1. **Decimate** - Convert 24/20 kHz raw IQ to 10 Hz decimated IQ
    - Reads from raw buffer (handles both legacy 1-minute files and 10-minute chunk files)
    - Enumerates all 1440 expected minutes per day explicitly (no gaps missed at day boundaries)
-   - Single `StatefulDecimator` per channel preserves filter state across minutes
+   - Runs each unbroken run of readable minutes through one `StatefulDecimator`, which carries filter state from minute to minute
    - Multi-stage: CIC (R=60) → compensation FIR → final FIR (R=40)
-   - The final FIR is a Kaiser design, 2,427 taps at 24 kHz input. It rejects at least 90 dB from 6 Hz (94.6 dB measured) and stays flat within 0.1 dB across 0-5 Hz
-   - The decimator removes its own group delay (3.115 s). Each 10 Hz sample belongs to the instant its index names
+   - The final FIR is a Kaiser design with 2,427 taps. It runs at 400 Hz, whatever the input rate. It rejects at least 90 dB from 6 Hz (94.6 dB measured) and stays flat within 0.1 dB across 0-5 Hz
+   - The decimator removes its own group delay, about 3.1 s. The exact value varies slightly with the input rate, and the `decimator` record in `_meta.json` carries it. Each 10 Hz sample belongs to the instant its index names
    - Borrows one minute from each neighbouring day, so the filter has history at the day's edges
-   - Marks `filter_edge: true` in the day's `_meta.json` for each minute beside a gap, a counter-epoch change, or an unborrowed day edge. Those minutes carry filter settling
+   - Marks `filter_edge: true` in the day's `_meta.json` for each minute beside a gap, a counter-epoch change, or an unborrowed day edge. Those minutes carry filter settling. A short minute padded with zeros carries the flag too, and so does the minute after it
+   - Builds the day aside and replaces the old product only when the new build holds at least as many valid minutes. A re-run after raw data has aged out keeps the old product
    - Outputs to `/var/lib/timestd/products/{CHANNEL}/decimated/`
 
 2. **Package** - Package as Digital RF

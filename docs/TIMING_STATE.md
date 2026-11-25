@@ -46,7 +46,8 @@ and decode exactly as before.
 ## Where the 10 Hz samples stand
 
 Each 10 Hz output sample belongs to the instant its index names. The
-decimator removes its own group delay (3.115 s with the version 2 filter),
+decimator removes its own group delay (about 3.1 s with the version 2 filter;
+the day's `decimator` record gives the exact value for its input rate),
 so no reader needs to shift the samples.
 
 Each day's `_meta.json` summary carries a `decimator` record: name

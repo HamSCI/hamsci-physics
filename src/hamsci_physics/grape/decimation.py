@@ -142,13 +142,15 @@ SIGNAL FLOW
     │   - Input:  400 Hz                                                   │
     │   - Output: 10 Hz                                                    │
     │   - Sharp cutoff at 5 Hz (Nyquist)                                   │
-    │   - Kaiser FIR, 2,427 taps at 24 kHz input, ≥ 90 dB from 6 Hz        │
+    │   - Kaiser FIR, 2,427 taps at 400 Hz for every input rate            │
+    │   - Rejects ≥ 90 dB from 6 Hz                                        │
     └──────────────────────────────────────────────────────────────────────┘
            │
            ▼
     Output: Complex IQ @ 10 Hz (600 samples/minute), each sample on the
-    instant its label names: the decimator removes its own group delay
-    (74,758 input samples, 3.115 s, at 24 kHz) and records that it did.
+    instant its label names.  The decimator removes its own group delay,
+    about 3.1 s; the exact value differs a little with the input rate
+    (74,758 input samples at 24 kHz), and describe() records it.
 
 ================================================================================
 DESIGN GOALS
