@@ -46,14 +46,25 @@ def test_pipeline_resets_the_decimator_at_an_epoch_boundary(monkeypatch):
     """A new StatefulDecimator is built when counter_epoch_id changes, so no
     filter history spans a re-based counter."""
     from hamsci_physics.grape import decimation_pipeline as dp
-    built = []
+    built, flushed = [], []
 
     class FakeDecimator:
+        latency_outputs = 0
+
         def __init__(self, input_rate, output_rate):
             built.append((input_rate, output_rate))
 
+        def prime(self, s): pass
+
         def process(self, samples):
             return np.zeros(600, np.complex64)
+
+        def flush(self, lookahead=None):
+            flushed.append(lookahead)
+            return np.zeros(0, np.complex64)
+
+        def describe(self):
+            return {}
     monkeypatch.setattr(dp, "StatefulDecimator", FakeDecimator)
     epochs = iter(["pair-1", "pair-1", "pair-2"])
 
@@ -62,11 +73,14 @@ def test_pipeline_resets_the_decimator_at_an_epoch_boundary(monkeypatch):
 
         def get_sample_rate(self, date_str): return 24000
 
+        base = 1_788_480_000                    # 2026-09-04T00:00:00Z, inside the day under test
+
         def get_available_minutes(self, date_str):
-            base = 1_788_480_000                # 2026-09-04T00:00:00Z, inside the day under test
-            return [base, base + 60, base + 120]
+            return [self.base, self.base + 60, self.base + 120]
 
         def read_minute(self, ts):
+            if ts not in self.get_available_minutes(None):
+                return None, None
             return (np.zeros(24000 * 60, np.complex64),
                     {"timing": {"schema": "v2", "origin": "sysclock", "u_epoch_ns": 8_030_000,
                                 "counter_epoch_id": next(epochs)}})
@@ -77,7 +91,12 @@ def test_pipeline_resets_the_decimator_at_an_epoch_boundary(monkeypatch):
         def write_minute(self, **kw): self.rows.append(kw); return True
 
         def flush_metadata(self): pass
+
+        def set_decimator(self, date_str, record): pass
+
+        def discard_day(self, date_str): pass
     monkeypatch.setattr(dp, "RawBinaryReader", FakeReader)
     monkeypatch.setattr(dp, "DecimatedBuffer", FakeBuffer)
     dp.DecimationPipeline(Path("/nonexistent"))._process_channel_day("20260904", "SHARED_5000")
     assert len(built) == 2, "one decimator for pair-1, a fresh one for pair-2"
+    assert len(flushed) == 2, "each stream flushed, the epoch change included"

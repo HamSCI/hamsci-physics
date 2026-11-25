@@ -72,6 +72,28 @@ def _per_minute_gap(meta: Optional[dict]) -> int:
     chunk_minutes = max(1, chunk_dur_sec // 60)
     return chunk_gap // chunk_minutes
 
+
+def _neighbour_minute(reader, minute_ts: int, epoch: Optional[str],
+                      expected: int) -> Optional[np.ndarray]:
+    """One raw minute borrowed from a neighbouring day, or None.
+
+    Returns the minute's samples only when the reader holds exactly
+    ``expected`` samples for it and its sidecar's ``counter_epoch_id``
+    equals ``epoch`` (two ``None``s count as equal).  No filter history
+    may span a re-based counter (MEASUREMENT_MODEL §3), and a short or
+    padded minute would put zeros, not signal, into the filters.
+    """
+    try:
+        samples, meta = reader.read_minute(minute_ts)
+    except Exception as e:
+        logger.warning(f"neighbour minute {minute_ts} unreadable: {e}")
+        return None
+    if samples is None or len(samples) != expected:
+        return None
+    if timing_state_from_sidecar(meta).counter_epoch_id != epoch:
+        return None
+    return np.asarray(samples, dtype=np.complex64)
+
 class DecimationPipeline:
     """
     Pipeline to process raw high-rate station data into 10 Hz products.
@@ -139,53 +161,94 @@ class DecimationPipeline:
         Process one channel for one day.
 
         Enumerates all 1440 expected minutes (minute 0 through 1439) so that
-        gap accounting is explicit and complete — including gaps at the start
-        or end of the day that the old iterator-based approach would miss.
+        gap accounting is explicit and complete, including gaps at the start
+        or end of the day.
 
-        Uses a single StatefulDecimator instance across all minutes to preserve
-        phase continuity. The decimator maintains filter state between calls,
-        eliminating phase discontinuities at minute boundaries.
+        Since v3.96 (decision 2, 2026-11-23) each 10 Hz sample lands under
+        its own label.  The decimator removes its own filter delay: it holds
+        back latency_outputs samples and returns them from flush().  So the
+        pipeline runs the day as streams of contiguous readable minutes.  A
+        gap, a minute the decimator fails on, or a change of counter epoch
+        (MEASUREMENT_MODEL §3: a radiod restart renumbers the samples) ends
+        the stream; the pipeline flushes it, and the next readable minute
+        starts a fresh decimator.  Stream outputs go into a day array at the
+        stream's first minute times 600, so a lost minute never shifts a
+        later label.  Gaps no longer run zeros through the filters.
+
+        At the day's two edges the pipeline borrows one raw minute from the
+        neighbouring day, when that minute exists in the same counter
+        epoch: the minute before midnight primes the first stream, and the
+        minute after the day feeds the last flush.  A minute whose filters
+        ran into zeros (beside a gap, a failure, an epoch change, or an
+        unborrowed day edge) carries ``filter_edge = True``.
+
+        A re-run discards the day's earlier files first, so no minute from
+        an older run survives beside the new ones.
         """
         logger.info(f"Starting {channel_name} for {date_str}")
 
         reader = RawBinaryReader(self.data_root, channel_name)
         output_buffer = DecimatedBuffer(self.data_root, channel_name)
 
-        # Determine sample rate
         input_rate = reader.get_sample_rate(date_str)
         logger.info(f"  Input rate: {input_rate} Hz")
 
         expected_raw_samples = input_rate * 60  # e.g., 1440000 for 24kHz
+        decimation_ratio = input_rate // 10
 
-        # Single decimator instance for entire day — preserves phase continuity
-        decimator = StatefulDecimator(input_rate=input_rate, output_rate=10)
-
-        # Build lookup of available raw minutes for this day
         available_minutes = set(reader.get_available_minutes(date_str))
 
-        # Compute the Unix timestamp of minute-0 for this UTC day
         from datetime import datetime as _dt, timezone as _tz
         day_start_dt = _dt.strptime(date_str, '%Y%m%d').replace(tzinfo=_tz.utc)
         day_start_ts = int(day_start_dt.timestamp())
 
-        minutes_processed = 0
+        output_buffer.discard_day(date_str)
+        out = np.zeros(1440 * SAMPLES_PER_MINUTE, dtype=np.complex64)
+        rows = {}               # minute index -> row for write_minute
+        record = None           # the decimator's describe(), for the day
+
         gap_minutes_total = 0
-        samples_generated = 0
-        last_epoch = None   # MEASUREMENT_MODEL §3: the counter epoch in force
+        stream = None           # the decimator of the current stream
+        epoch = None            # the counter epoch in force in the stream
+        cursor = 0              # next output's index in `out`
+        last_good = None        # last minute the stream processed cleanly
+        edge_start = False
+
+        def put(y, end):
+            """Write y at the cursor, never past sample `end`."""
+            nonlocal cursor
+            if y is None or len(y) == 0:
+                return
+            n = max(0, min(len(y), end - cursor))
+            out[cursor:cursor + n] = y[:n]
+            cursor += n
+
+        def end_stream(lookahead=None):
+            """Flush the stream; flag its last minute unless lookahead fed it."""
+            nonlocal stream
+            if stream is None:
+                return
+            if last_good is not None:
+                tail = stream.flush(lookahead=lookahead)
+                put(tail, (last_good + 1) * SAMPLES_PER_MINUTE)
+                if lookahead is None:
+                    rows[last_good]['filter_edge'] = True
+            else:
+                stream.flush()
+            stream = None
 
         import gc
 
         for minute_index in range(1440):
             minute_ts = day_start_ts + minute_index * 60
-            decimated_chunk = None
+            samples, meta = None, None
             gap_info = 0
 
             if minute_ts in available_minutes:
-                # Read raw data for this minute
                 samples, meta = reader.read_minute(minute_ts)
-
-                if samples is not None and len(samples) > 0:
-                    # Pad incomplete minutes to maintain sample alignment
+                if samples is not None and len(samples) == 0:
+                    samples = None
+                if samples is not None:
                     if len(samples) < expected_raw_samples:
                         gap_info = expected_raw_samples - len(samples)
                         padded = np.zeros(expected_raw_samples, dtype=np.complex64)
@@ -194,82 +257,89 @@ class DecimationPipeline:
                     elif len(samples) > expected_raw_samples:
                         samples = samples[:expected_raw_samples]
 
-                    # MEASUREMENT_MODEL §3: a radiod restart renumbers the
-                    # samples.  No filter history may span a re-based
-                    # counter, so a new epoch gets a fresh decimator.
-                    state = timing_state_from_sidecar(meta)
-                    if state.counter_epoch_id and last_epoch and state.counter_epoch_id != last_epoch:
-                        logger.info(f"  {channel_name}: counter epoch {last_epoch} -> {state.counter_epoch_id} "
-                                    f"at minute {minute_index}; resetting decimator state (MEASUREMENT_MODEL §3)")
-                        decimator = StatefulDecimator(input_rate=input_rate, output_rate=10)
-                    if state.counter_epoch_id:
-                        last_epoch = state.counter_epoch_id
+            state = timing_state_from_sidecar(meta) if samples is not None else None
+            e = state.counter_epoch_id if state is not None else None
 
-                    # Process with continuous decimator state
-                    decimated_chunk = decimator.process(samples)
-
-                    # Check for gaps in metadata.  The sidecar's
-                    # gap_samples is chunk-wide; spread it across the
-                    # chunk's minutes so aggregate completeness adds up
-                    # correctly (see _per_minute_gap docstring).
-                    gap_info = max(gap_info, _per_minute_gap(meta))
-
-                    # Convert gap_info from raw sample space to decimated space
-                    decimation_ratio = input_rate // 10
-                    if decimation_ratio > 0:
-                        gap_info = gap_info // decimation_ratio
-
-                    del samples
-                else:
-                    # File existed but read failed — treat as gap
-                    gap_samples = np.zeros(expected_raw_samples, dtype=np.complex64)
-                    _ = decimator.process(gap_samples)
+            # A gap, or a new counter epoch, ends the stream.  "New epoch"
+            # means both ids present and unequal (MEASUREMENT_MODEL §3).
+            new_epoch = stream is not None and bool(e) and bool(epoch) and e != epoch
+            if samples is None or new_epoch:
+                if new_epoch:
+                    logger.info(f"  {channel_name}: counter epoch {epoch} -> {e} at minute "
+                                f"{minute_index}; ending the decimator stream (MEASUREMENT_MODEL §3)")
+                end_stream()
+                if samples is None:
                     gap_minutes_total += 1
-                    del gap_samples
-                    meta = None
-            else:
-                # No raw file for this minute — feed zeros to maintain
-                # filter state and time alignment, discard output
-                gap_samples = np.zeros(expected_raw_samples, dtype=np.complex64)
-                _ = decimator.process(gap_samples)
+                    continue
+
+            if stream is None:
+                stream = StatefulDecimator(input_rate=input_rate, output_rate=10)
+                record = stream.describe()
+                cursor = minute_index * SAMPLES_PER_MINUTE
+                epoch = e
+                last_good = None
+                history = (_neighbour_minute(reader, minute_ts - 60, e, expected_raw_samples)
+                           if minute_index == 0 else None)
+                if history is not None:
+                    stream.prime(history)
+                edge_start = history is None
+            if e:
+                epoch = e
+
+            y = stream.process(samples)
+            del samples
+            if y is None:
+                # The decimator failed on this minute: end the stream before
+                # it, count the minute as a gap, start afresh after it.
+                logger.warning(f"  {channel_name}: decimation failed at minute {minute_index}; "
+                               f"treating it as a gap")
+                end_stream()
                 gap_minutes_total += 1
-                del gap_samples
-                meta = None
+                continue
+            put(y, (minute_index + 1) * SAMPLES_PER_MINUTE)
 
-            if decimated_chunk is not None and len(decimated_chunk) > 0:
-                state = timing_state_from_sidecar(meta)
+            # The sidecar's gap_samples is chunk-wide; spread it across the
+            # chunk's minutes (see _per_minute_gap), then convert to 10 Hz.
+            gap_info = max(gap_info, _per_minute_gap(meta))
+            if decimation_ratio > 0:
+                gap_info = gap_info // decimation_ratio
 
-                success = output_buffer.write_minute(
-                    minute_utc=float(minute_ts),
-                    decimated_iq=decimated_chunk,
-                    d_clock_ms=state.d_clock_ms,
-                    uncertainty_ms=state.uncertainty_ms,
-                    quality_grade=state.quality_grade,
-                    gap_samples=gap_info,
-                    counter_epoch_id=state.counter_epoch_id,
-                    origin=state.origin,
-                )
-
-                if success:
-                    minutes_processed += 1
-                    samples_generated += len(decimated_chunk)
-
-            del decimated_chunk
-
-            # Force GC after every minute to prevent memory accumulation
-            # from decompressed buffers (zstd/lz4)
+            rows[minute_index] = dict(minute_ts=minute_ts, state=state, gap_info=gap_info,
+                                      filter_edge=edge_start)
+            edge_start = False
+            last_good = minute_index
             gc.collect()
 
-        # Flush accumulated metadata to disk (single JSON write instead of 1440)
+        if stream is not None:
+            ahead = (_neighbour_minute(reader, day_start_ts + 1440 * 60, epoch, expected_raw_samples)
+                     if last_good == 1439 else None)
+            end_stream(lookahead=ahead)
+
+        minutes_processed = 0
+        for minute_index, row in sorted(rows.items()):
+            state = row['state']
+            lo = minute_index * SAMPLES_PER_MINUTE
+            if output_buffer.write_minute(
+                minute_utc=float(row['minute_ts']),
+                decimated_iq=out[lo:lo + SAMPLES_PER_MINUTE],
+                d_clock_ms=state.d_clock_ms,
+                uncertainty_ms=state.uncertainty_ms,
+                quality_grade=state.quality_grade,
+                gap_samples=row['gap_info'],
+                counter_epoch_id=state.counter_epoch_id,
+                origin=state.origin,
+                filter_edge=row['filter_edge'],
+            ):
+                minutes_processed += 1
+        if rows:
+            output_buffer.set_decimator(date_str, record)
+
         output_buffer.flush_metadata()
 
-        # Clean up to prevent memory accumulation across channels
-        del reader
-        del output_buffer
-        del decimator
+        del reader, output_buffer, stream, out
         gc.collect()
 
         logger.info(
             f"  Completed {channel_name}: {minutes_processed} valid, "
-            f"{gap_minutes_total} gaps, {samples_generated} samples"
+            f"{gap_minutes_total} gaps, {minutes_processed * SAMPLES_PER_MINUTE} samples"
         )
