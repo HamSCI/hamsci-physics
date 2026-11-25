@@ -22,10 +22,15 @@ instrument_id    = ""
 data_root        = "/var/lib/timestd"
 
 [grape]
-# Daily pipeline: decimate → spectrogram → package → upload.
+# Daily pipeline: decimate → package → upload (spectrograms optional, below).
 enabled          = true
 # Skip the upload stage (science still runs, datasets stay local).
 upload           = true
+# Daily spectrogram PNGs for station-web's /grape page.  Off by default
+# (decision 2026-11-23): one channel-day takes about 1.6 GB and 15 s to
+# draw, and nothing ships them.  When on, they draw after packaging and
+# never hold the upload back.
+spectrograms     = false
 
 [reanalysis]
 # Offline re-solve of a day's arrivals into TEC/dTEC products.

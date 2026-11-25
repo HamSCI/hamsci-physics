@@ -146,6 +146,47 @@ def _grape_sweep_retry(day: str, data_root, config_path, debug: bool = False) ->
         return 1
 
 
+def _spectrograms_enabled(config: dict) -> bool:
+    """True only when `[grape] spectrograms = true` is a TOML boolean.
+
+    Off by default (decision 2026-11-23).  A string such as "true" stays off.
+    """
+    grape = (config or {}).get("grape")
+    return isinstance(grape, dict) and grape.get("spectrograms") is True
+
+
+def _run_spectrogram_stage(config: dict, data_root: Path, channels: list,
+                           date_str: str, grid: str) -> list:
+    """Draw each channel's daily spectrogram when the operator turned them on.
+
+    Returns the channels drawn.  When off, returns [] and imports nothing
+    (matplotlib stays unloaded).  One channel's failure, a MemoryError
+    included, costs that channel only; the stage never raises or exits.
+    """
+    if not _spectrograms_enabled(config):
+        return []
+    drawn = []
+    try:
+        from .grape.spectrogram import CarrierSpectrogramGenerator
+    except Exception as exc:  # noqa: BLE001 — drawing never gates the upload
+        print(f"   ⚠️  spectrograms unavailable (continuing): {exc}")
+        return []
+    for ch in channels:
+        try:
+            gen = CarrierSpectrogramGenerator(data_root=data_root,
+                                              channel_name=ch,
+                                              receiver_grid=grid)
+            result = gen.generate_daily(date_str)
+            if result and result.exists():
+                drawn.append(ch)
+                print(f"   ✅ {ch}: {result.name}")
+            else:
+                print(f"   ⚠️  {ch}: no spectrogram drawn")
+        except Exception as exc:  # noqa: BLE001
+            print(f"   ❌ {ch}: {exc}")
+    return drawn
+
+
 def _grape_daily_driver(yesterday: str, data_root, config_path,
                         debug: bool = False) -> int:
     """The timer's run: yesterday, then the catch-up sweep, each day in its
@@ -371,7 +412,6 @@ def main():
                 sys.exit(_grape_daily_driver(resolve_date(None), data_root,
                                              Path(args.config), args.debug))
             from .grape.decimation_pipeline import DecimationPipeline
-            from .grape.spectrogram import CarrierSpectrogramGenerator
             from .grape.packager import DailyDRFPackager, StationConfig, STANDARD_CHANNELS
             import toml
             import os
@@ -405,7 +445,8 @@ def main():
                 'status': 'running',
                 'channels_expected': expected_count,
                 'channels_decimated': 0,
-                'channels_spectrogram': 0,
+                'spectrograms_enabled': False,
+                'channels_spectrogram': None,
                 'upload_status': 'pending',
                 'upload_completed': 0,
                 'upload_failed': 0,
@@ -460,48 +501,8 @@ def main():
                 print(f"   ⚠️  {len(failed_decimate)} channels had no data: {', '.join(failed_decimate)}")
             print(f"   ✅ GATE PASSED: {len(decimated)}/{expected_count} channels decimated")
 
-            # === Stage 2: Generate spectrograms ===
-            print(f"\n━━━ Stage 2: Spectrograms ({len(decimated)} channels) ━━━")
-            spectrograms = []
-            failed_spec = []
-
-            for ch in decimated:
-                try:
-                    gen = CarrierSpectrogramGenerator(
-                        data_root=data_root,
-                        channel_name=ch,
-                        receiver_grid=grid
-                    )
-                    result = gen.generate_daily(date_str)
-                    if result and result.exists():
-                        spectrograms.append(ch)
-                        print(f"   ✅ {ch}: {result.name}")
-                    else:
-                        failed_spec.append(ch)
-                        print(f"   ⚠️  {ch}: no spectrogram generated")
-                except Exception as e:
-                    failed_spec.append(ch)
-                    print(f"   ❌ {ch}: {e}")
-
-            print(f"\n   Spectrograms: {len(spectrograms)}/{len(decimated)} channels")
-            pipeline_status['channels_spectrogram'] = len(spectrograms)
-            _save_status()
-
-            # === Gate 2: At least one spectrogram must exist ===
-            if len(spectrograms) == 0:
-                print(f"   ❌ GATE FAILED: 0/{len(decimated)} spectrograms generated")
-                print(f"   Aborting — no spectrograms to package/upload")
-                pipeline_status['status'] = 'failed'
-                pipeline_status['error'] = f'0/{len(decimated)} spectrograms generated'
-                pipeline_status['completed_at'] = datetime.now(tz=timezone.utc).isoformat()
-                _save_status()
-                sys.exit(1)
-            if failed_spec:
-                print(f"   ⚠️  {len(failed_spec)} spectrograms missing: {', '.join(failed_spec)}")
-            print(f"   ✅ GATE PASSED: {len(spectrograms)}/{len(decimated)} spectrograms generated")
-
-            # === Stage 3: Package into Digital RF ===
-            print(f"\n━━━ Stage 3: Package ━━━")
+            # === Stage 2: Package into Digital RF ===
+            print(f"\n━━━ Stage 2: Package ━━━")
             try:
                 station_config = StationConfig(callsign=callsign, grid_square=grid)
                 packager = DailyDRFPackager(data_root=data_root, station_config=station_config)
@@ -543,6 +544,16 @@ def main():
                 mark_day_packaged(upload_dir)
             except OSError as exc:  # a missing marker costs one retry, never the product
                 print(f"   ⚠️  could not mark {upload_dir} packaged (continuing): {exc}")
+
+            # === Spectrograms: off unless [grape] spectrograms = true ===
+            # After packaging, and never a gate: the upload does not wait on them.
+            pipeline_status['spectrograms_enabled'] = _spectrograms_enabled(config)
+            if pipeline_status['spectrograms_enabled']:
+                print(f"\n━━━ Spectrograms ({len(decimated)} channels) ━━━")
+            drawn = _run_spectrogram_stage(config, data_root, decimated, date_str, grid)
+            if pipeline_status['spectrograms_enabled']:
+                pipeline_status['channels_spectrogram'] = len(drawn)
+            _save_status()
 
             # === Stage 4: Upload to PSWS ===
             upload_attempted = False
@@ -612,8 +623,6 @@ def main():
                     # Retention must never take the pipeline down with it.
                     print(f"   ⚠️  spool trim skipped: {e}")
 
-                # Spectrograms are KEPT — they're the permanent visual record
-                print(f"   Spectrograms retained")
 
             # Finalize status
             pipeline_status['status'] = 'completed' if upload_ok or args.no_upload else 'upload_pending'
@@ -622,7 +631,10 @@ def main():
 
             print(f"\n✅ GRAPE daily pipeline complete for {date_str}")
             print(f"   {len(decimated)}/{expected_count} channels decimated")
-            print(f"   {len(spectrograms)} spectrograms generated")
+            if pipeline_status['spectrograms_enabled']:
+                print(f"   spectrograms drawn: {len(drawn)}/{len(decimated)}")
+            else:
+                print("   spectrograms: off (set [grape] spectrograms = true to draw)")
             # Reporting must not be able to discard a completed run. The
             # NameError this replaced killed the process here, after every
             # stage had succeeded and state was saved, and turned a good

@@ -13,8 +13,8 @@ EnvironmentFile=-/etc/sigmond/coordination.env
 
 Environment=PATH=/opt/git/sigmond/hamsci-physics/venv/bin:/usr/bin:/bin
 
-# Full orchestrated pipeline: decimate → spectrogram → package → upload
-# Gates enforce: all 9 channels decimated + all 9 spectrograms generated before upload
+# Full orchestrated pipeline: decimate → package → upload
+# Gate: at least one channel decimated and one OBS dataset packaged.  Spectrograms only when [grape] spectrograms = true; never a gate.
 ExecStart=/opt/git/sigmond/hamsci-physics/venv/bin/python3 -m hamsci_physics.cli grape daily
 
 # Logging
