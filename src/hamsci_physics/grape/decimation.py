@@ -28,7 +28,10 @@ Each stage has relaxed filter requirements:
     Stage 1: 24 kHz → 400 Hz, transition at 200 Hz (0.8% of Nyquist) → ~100 taps
     Stage 2: 400 Hz → 10 Hz, transition at 5 Hz (2.5% of Nyquist) → 2,427 taps
 
-TOTAL COMPUTATION: ~300 multiplies/sample vs ~100,000 for single-stage
+TOTAL COMPUTATION: about 280 multiplies per 24 kHz input sample, against
+~100,000 for a single stage.  As implemented here the CIC runs as four
+60-tap boxcars (240), and the final FIR computes all 2,427 taps at 400 Hz
+before keeping 1 in 40 (about 40 per input sample).
 
 REFERENCE: Crochiere, R.E. & Rabiner, L.R. (1983). "Multirate Digital Signal
            Processing." Prentice-Hall. Chapter 3.
@@ -143,7 +146,9 @@ SIGNAL FLOW
     └──────────────────────────────────────────────────────────────────────┘
            │
            ▼
-    Output: Complex IQ @ 10 Hz (600 samples/minute)
+    Output: Complex IQ @ 10 Hz (600 samples/minute), each sample on the
+    instant its label names: the decimator removes its own group delay
+    (74,758 input samples, 3.115 s, at 24 kHz) and records that it did.
 
 ================================================================================
 DESIGN GOALS
@@ -174,12 +179,15 @@ USAGE
     # Decimate to 10 Hz; the decimator keeps filter state between calls
     decimator = StatefulDecimator(input_rate=24000, output_rate=10)
     iq_10hz = decimator.process(iq_24k)
-    
-    print(len(iq_10hz))  # 600 samples (60 seconds × 10 Hz)
+    print(len(iq_10hz))  # 569: the first call holds back latency_outputs (31)
+
+    tail = decimator.flush()  # the 31 held-back samples; then it resets
+    print(len(iq_10hz) + len(tail))  # 600 samples (60 seconds × 10 Hz)
 
 ================================================================================
 REVISION HISTORY
 ================================================================================
+2026-11-25: Group delay removed (DECIMATOR_VERSION 2); prime, flush, describe
 2026-11-25: Kaiser normalisation fixed, tap cap removed (was 22 dB at 6 Hz)
 2025-12-07: Added comprehensive theoretical documentation
 2025-11-01: Added support for 16 kHz input (legacy compatibility)
@@ -221,6 +229,7 @@ FINAL_FIR_PASSBAND_HZ = 5.0
 FINAL_FIR_STOPBAND_HZ = 6.0
 FINAL_FIR_DESIGN_DB = 95.0
 ALIAS_REJECTION_FLOOR_DB = 90.0  # required from 6 Hz to 200 Hz
+DECIMATOR_VERSION = 2  # 2: removes its own group delay (v3.96)
 
 
 def _design_cic_filter(decimation_factor: int, order: int = 4) -> dict:
@@ -474,52 +483,60 @@ def stopband_rejection_db(taps: np.ndarray, sample_rate: float,
 
 class StatefulDecimator:
     """
-    Stateful decimator that preserves filter state across calls.
-    
-    This eliminates the ~1 second filter transients at minute boundaries
-    that cause visible artifacts in spectrograms.
-    
+    Stateful decimator that preserves filter state across calls and
+    removes its own group delay.
+
+    Filter state carries across calls, so minute boundaries leave no
+    transient.  The decimator also picks its two decimation phases so that
+    every 10 Hz output stands on the instant its label names: output i of
+    a stream belongs to the instant i x 0.1 s after the stream's first
+    input sample.  To do that it holds back K = latency_outputs outputs
+    (the filters' delay rounded down to whole outputs); the first process()
+    call returns K fewer samples than its input covers, and flush() returns
+    them at the end of the stream.
+
+    This removes the decimator's own filter delay, a fixed property of the
+    code.  It applies no clock correction.  describe() records the
+    correction for the output's metadata.
+
     Usage:
         decimator = StatefulDecimator(input_rate=24000, output_rate=10)
-        
-        # Process minute by minute - state is preserved
+        decimator.prime(previous_minute)        # optional history
         for minute_samples in minute_chunks:
             decimated = decimator.process(minute_samples)
-            # No transient artifacts at boundaries!
-        
-        # Reset state for new channel/session
-        decimator.reset()
+        tail = decimator.flush(lookahead=next_minute)   # or flush()
+        # flush() resets the decimator for the next stream
     """
-    
+
     def __init__(self, input_rate: int = 24000, output_rate: int = 10):
         """
         Initialize stateful decimator.
-        
+
         Args:
             input_rate: Input sample rate (Hz) - 24000, 20000 or 16000
             output_rate: Output sample rate (Hz) - must be 10
         """
         if output_rate != OUTPUT_RATE:
             raise ValueError(f"Output rate must be {OUTPUT_RATE} Hz")
-        
+
         if input_rate not in SUPPORTED_INPUT_RATES:
             raise ValueError(f"Unsupported input rate: {input_rate} Hz")
-        
+
         self.input_rate = input_rate
         self.output_rate = output_rate
-        
+
         rate_config = SUPPORTED_INPUT_RATES[input_rate]
         self.cic_decimation = rate_config['cic_decimation']
-        
+
         # Design filters once
         self.cic_params = _design_cic_filter(self.cic_decimation, order=4)
-        
+
         # CIC boxcar coefficients
         R = self.cic_params['decimation_factor']
         self.cic_b = np.ones(R) / R
         self.cic_a = [1.0]
         self.cic_order = self.cic_params['order']
-        
+
         self.comp_taps = _design_compensation_fir(
             sample_rate=400,
             passband_width=5.0,
@@ -527,85 +544,197 @@ class StatefulDecimator:
             cic_decimation=self.cic_decimation,
             num_taps=63
         )
-        
+
         self.final_taps = _design_final_fir(sample_rate=400)
-        
+
+        # Group delay of the whole cascade, in input samples.  Every stage
+        # is linear phase with an integer delay: N boxcars of R taps delay
+        # N(R-1)/2 input samples (N = 4, so this is whole); each odd-length
+        # FIR at 400 Hz delays (taps-1)/2 samples of R input samples each.
+        self.input_per_output = input_rate // OUTPUT_RATE      # 40 R
+        self.group_delay_input_samples = (
+            (self.cic_order * (R - 1)) // 2
+            + R * ((len(self.comp_taps) - 1) // 2)
+            + R * ((len(self.final_taps) - 1) // 2))           # 74,758 at 24 kHz
+        D = self.group_delay_input_samples
+        # Keep CIC output n (input rate) when n % R == cic_phase, and
+        # 400 Hz output m when m % 40 == final_phase.  Then absolute output
+        # j sits at input sample 40 R (j - latency_outputs): exactly on the
+        # 10 Hz grid, since D = 40 R K + R p + q.
+        self.cic_phase = D % R
+        self.final_phase = (D // R) % FINAL_FIR_DECIMATION
+        self.latency_outputs = D // self.input_per_output       # 31 at 24 kHz
+
         # Initialize filter states
         self.reset()
-        
-        logger.info(f"StatefulDecimator initialized: {input_rate} → {output_rate} Hz")
-    
+
+        logger.info(f"StatefulDecimator initialized: {input_rate} → {output_rate} Hz, "
+                    f"group delay {D} samples removed")
+
     def reset(self):
-        """Reset all filter states (call at session/channel boundaries)."""
+        """Reset all filter states and counters (call at session/channel boundaries)."""
         # CIC: N cascaded stages, each needs state
-        R = self.cic_params['decimation_factor']
-        self.cic_zi = [signal.lfilter_zi(self.cic_b, self.cic_a) * 0 
+        self.cic_zi = [signal.lfilter_zi(self.cic_b, self.cic_a) * 0
                       for _ in range(self.cic_order)]
-        
+
         # Compensation FIR state
         self.comp_zi = signal.lfilter_zi(self.comp_taps, [1.0]) * 0
-        
+
         # Final FIR state
         self.final_zi = signal.lfilter_zi(self.final_taps, [1.0]) * 0
-        
-        # Track samples for decimation phase alignment
+
+        # Absolute counters for decimation phase alignment
         self.cic_sample_count = 0
         self.final_sample_count = 0
-        
+
+        # Outputs still to drop: the latency, plus any primed outputs
+        self.primed_outputs = 0
+        self._discard_remaining = self.latency_outputs
+        # Stream bookkeeping (excludes primed input)
+        self._stream_input_samples = 0
+        self._stream_outputs = 0
+        self._processed = False
+
         logger.debug("Decimator state reset")
-    
+
+    def _filter(self, iq_samples: np.ndarray) -> np.ndarray:
+        """Run the cascade; return every new absolute output, before any discard."""
+        R = self.cic_params['decimation_factor']
+
+        # STAGE 1: CIC filter with state, decimate on phase q
+        filtered = iq_samples
+        for i in range(self.cic_order):
+            filtered, self.cic_zi[i] = signal.lfilter(
+                self.cic_b, self.cic_a, filtered, zi=self.cic_zi[i])
+        start = (self.cic_phase - self.cic_sample_count) % R
+        self.cic_sample_count += len(filtered)
+        iq_400hz = filtered[start::R]
+        if len(iq_400hz) == 0:
+            return np.array([], dtype=np.complex64)
+
+        # STAGE 2: Compensation FIR with state
+        iq_400hz_flat, self.comp_zi = signal.lfilter(
+            self.comp_taps, [1.0], iq_400hz, zi=self.comp_zi)
+
+        # STAGE 3: Final FIR with state, decimate by 40 on phase p
+        iq_filtered, self.final_zi = signal.lfilter(
+            self.final_taps, [1.0], iq_400hz_flat, zi=self.final_zi)
+        start = (self.final_phase - self.final_sample_count) % FINAL_FIR_DECIMATION
+        self.final_sample_count += len(iq_filtered)
+        return iq_filtered[start::FINAL_FIR_DECIMATION].astype(np.complex64)
+
+    def _discard(self, out: np.ndarray) -> np.ndarray:
+        """Drop outputs still owed to the latency and the primed history."""
+        n = min(self._discard_remaining, len(out))
+        self._discard_remaining -= n
+        return out[n:]
+
+    def prime(self, iq_samples: np.ndarray) -> None:
+        """
+        Feed history that precedes the stream; its outputs are discarded.
+
+        Priming fills the filters so the stream's first outputs carry no
+        start transient.  The stream's instant 0 becomes the first sample
+        after the primed input.
+
+        Raises:
+            ValueError: length not a multiple of input_rate // 10
+            RuntimeError: called after process()
+        """
+        if self._processed:
+            raise RuntimeError("prime() must come before any process() call")
+        if len(iq_samples) % self.input_per_output != 0:
+            raise ValueError(
+                f"prime length {len(iq_samples)} is not a multiple of "
+                f"{self.input_per_output} samples (one output period)")
+        n_out = len(iq_samples) // self.input_per_output
+        self.primed_outputs += n_out
+        self._discard_remaining += n_out
+        self._discard(self._filter(np.asarray(iq_samples)))
+
     def process(self, iq_samples: np.ndarray) -> Optional[np.ndarray]:
         """
         Process samples with preserved filter state.
-        
+
+        Output i of the stream belongs to the instant i x 0.1 s after the
+        stream's first input sample.  The first call returns
+        latency_outputs fewer samples than its input covers; flush()
+        returns them.
+
         Args:
             iq_samples: Complex IQ samples at input_rate
-            
+
         Returns:
-            Decimated samples at output_rate
+            Decimated complex64 samples at output_rate, or None if the
+            numerics failed
         """
+        self._processed = True
         if len(iq_samples) == 0:
             return np.array([], dtype=np.complex64)
-        
+
         try:
-            # STAGE 1: CIC Filter with state preservation
-            R = self.cic_params['decimation_factor']
-            filtered = iq_samples
-            
-            for i in range(self.cic_order):
-                filtered, self.cic_zi[i] = signal.lfilter(
-                    self.cic_b, self.cic_a, filtered, zi=self.cic_zi[i]
-                )
-            
-            # Decimate with phase alignment
-            # Account for samples from previous calls
-            start_offset = (R - (self.cic_sample_count % R)) % R
-            self.cic_sample_count += len(filtered)
-            iq_400hz = filtered[start_offset::R]
-            
-            if len(iq_400hz) == 0:
-                return np.array([], dtype=np.complex64)
-            
-            # STAGE 2: Compensation FIR with state
-            iq_400hz_flat, self.comp_zi = signal.lfilter(
-                self.comp_taps, [1.0], iq_400hz, zi=self.comp_zi
-            )
-            
-            # STAGE 3: Final FIR + decimation with state
-            iq_filtered, self.final_zi = signal.lfilter(
-                self.final_taps, [1.0], iq_400hz_flat, zi=self.final_zi
-            )
-            
-            # Decimate by 40 with phase alignment
-            start_offset = (40 - (self.final_sample_count % 40)) % 40
-            self.final_sample_count += len(iq_filtered)
-            iq_10hz = iq_filtered[start_offset::40]
-            
-            return iq_10hz.astype(np.complex64)
-            
+            self._stream_input_samples += len(iq_samples)
+            out = self._discard(self._filter(iq_samples))
+            self._stream_outputs += len(out)
+            return out
         except Exception as e:
             logger.error(f"Stateful decimation failed: {e}")
             return None
+
+    def flush(self, lookahead: Optional[np.ndarray] = None) -> np.ndarray:
+        """
+        Return exactly the outputs the stream is still owed, then reset.
+
+        The stream's total output equals its input length // (input_rate
+        // 10).  To produce the held-back outputs the filters need input
+        that follows the stream: flush uses lookahead when given, and
+        zeros for whatever it lacks.  Lookahead input yields no outputs of
+        its own.
+
+        Args:
+            lookahead: Input that follows the stream (optional)
+
+        Returns:
+            complex64 array of the owed outputs
+        """
+        owed = self._stream_input_samples // self.input_per_output - self._stream_outputs
+        tail = []
+        have = 0
+        if owed > 0:
+            feed = (np.asarray(lookahead, dtype=np.complex64) if lookahead is not None
+                    else np.array([], dtype=np.complex64))
+            piece = self.input_per_output * (self.latency_outputs + 1)
+            pos = 0
+            while have < owed:
+                chunk = feed[pos:pos + piece]
+                pos += piece
+                if len(chunk) < piece:
+                    chunk = np.concatenate(
+                        [chunk, np.zeros(piece - len(chunk), dtype=np.complex64)])
+                out = self._discard(self._filter(chunk))
+                tail.append(out)
+                have += len(out)
+        result = (np.concatenate(tail)[:max(owed, 0)] if tail
+                  else np.array([], dtype=np.complex64))
+        self.reset()
+        return result.astype(np.complex64)
+
+    def describe(self) -> dict:
+        """State what the decimator did, for the output's metadata."""
+        return {
+            'name': 'grape-cic-fir',
+            'version': DECIMATOR_VERSION,
+            'input_rate_hz': self.input_rate,
+            'output_rate_hz': self.output_rate,
+            'group_delay_s': self.group_delay_input_samples / self.input_rate,
+            'group_delay_removed': True,
+            'residual_delay_s': 0.0,
+            'final_fir_taps': len(self.final_taps),
+            'passband_hz': FINAL_FIR_PASSBAND_HZ,
+            'stopband_hz': FINAL_FIR_STOPBAND_HZ,
+            'stopband_rejection_db': round(stopband_rejection_db(
+                self.final_taps, INTERMEDIATE_RATE, FINAL_FIR_STOPBAND_HZ), 1),
+        }
 
 
 def get_supported_rates() -> Dict[int, Dict]:

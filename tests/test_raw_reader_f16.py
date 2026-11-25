@@ -140,6 +140,7 @@ def test_mixed_day_decimates(mixed_day):
         out = decimator.process(samples)
         assert out is not None
         outputs.append(out)
+    outputs.append(decimator.flush())
     decimated = np.concatenate(outputs)
     assert decimated.dtype == np.complex64
     assert len(decimated) == 3 * 10
