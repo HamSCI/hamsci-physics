@@ -14,6 +14,7 @@ Suite-wide front door: [HamSCI/sigmond docs](https://github.com/HamSCI/sigmond/b
 | [GRAPE_DAILY_PROCESSING.md](GRAPE_DAILY_PROCESSING.md) ★ | operator/contributor | the daily GRAPE batch: raw IQ to PSWS-ready datasets |
 | [PSWS_SETUP_GUIDE.md](PSWS_SETUP_GUIDE.md) ★ | operator | PSWS upload setup; this repo builds datasets, the uploader ships them |
 | [TIMING_STATE.md](TIMING_STATE.md) ★ | contributor | what GRAPE reads from the chunk sidecars' timing block, and what it never reads |
+| [GNSS_VTEC.md](GNSS_VTEC.md) ★ | operator | the VTEC receiver's messages, the TCP relay, the orbit feed, the checks |
 | [NASA_EARTHDATA_SETUP.md](NASA_EARTHDATA_SETUP.md) | operator | a NASA Earthdata account for the GNSS VTEC service's DCB download |
 | [DRF_UPLOAD_SYSTEM.md](DRF_UPLOAD_SYSTEM.md) | contributor | Digital RF upload, per its text handled by a separate grape-recorder project (to re-check) |
 | [superpowers/](superpowers/) | — | design records: plans |
@@ -36,3 +37,6 @@ It moved here from hf-timestd's `timestd-vtec.service` in v3.96.
 - **By hand**, for a USB receiver: copy the example to
   `/etc/hamsci-physics/gnss-vtec.toml`, set `device`, and restart the unit.
   The [README](../README.md#gnss-vtec) walks through it.
+- **The receiver and the stream:** [GNSS_VTEC.md](GNSS_VTEC.md) covers the
+  messages the receiver must send, the TCP port 9000 relay, the orbit feed and
+  the checks.

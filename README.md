@@ -56,6 +56,9 @@ and the unit stays idle there.  Three things write the file:
 
   The unit runs with the `dialout` group, so it can open the serial port.
 
+For what the receiver must send, the TCP relay, the orbit feed and the checks,
+see [docs/GNSS_VTEC.md](docs/GNSS_VTEC.md).
+
 Without a `[station]` table in `gnss-vtec.toml`, the service takes the
 station's position from `STATION_LAT` and `STATION_LON` in
 `/etc/sigmond/coordination.env`, then from the centre of the grid square.
