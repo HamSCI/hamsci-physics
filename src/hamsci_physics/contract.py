@@ -25,6 +25,7 @@ out:
 from __future__ import annotations
 
 import logging
+import tomllib
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from pathlib import Path
@@ -43,6 +44,10 @@ DEFAULT_DATA_ROOT = "/var/lib/timestd"
 
 DEPLOY_TOML_PATH = "/opt/git/sigmond/hamsci-physics/deploy.toml"
 
+#: The GNSS VTEC service's own file.  hamsci-physics-vtec.service runs only
+#: where it exists, so the VTEC sink is declared only there.
+GNSS_VTEC_TOML = Path("/etc/hamsci-physics/gnss-vtec.toml")
+
 
 def _version() -> str:
     try:
@@ -55,6 +60,15 @@ def _version() -> str:
 def _data_root(config: dict) -> Path:
     return Path((config.get("paths", {}) or {}).get(
         "data_root", DEFAULT_DATA_ROOT))
+
+
+def _gnss_vtec_enabled() -> bool:
+    try:
+        with open(GNSS_VTEC_TOML, "rb") as fh:
+            section = tomllib.load(fh).get("gnss_vtec") or {}
+    except (OSError, tomllib.TOMLDecodeError):
+        return False
+    return section.get("enabled") is True
 
 
 def _data_sinks(config: dict, data_root: Path) -> list[dict[str, Any]]:
@@ -80,6 +94,11 @@ def _data_sinks(config: dict, data_root: Path) -> list[dict[str, Any]]:
         {"kind": "service", "target": f"{db}.L3C_propagation_stats",
          "schema_ref": f"{db}:1", "retention_days": 365, "mb_per_day": 1},
     ]
+    if _gnss_vtec_enabled():
+        # hamsci-physics-vtec.service: one row per VTEC epoch.
+        sinks.append({"kind": "service", "target": f"{db}.L3_gnss_vtec",
+                      "schema_ref": f"{db}:1", "retention_days": 30,
+                      "mb_per_day": 5})
     if (config.get("grape", {}) or {}).get("enabled", True):
         sinks.append({
             "kind": "file",

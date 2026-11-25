@@ -1,17 +1,17 @@
 # NASA Earthdata Account Setup
 
-Several hf-timestd services download data from NASA's CDDIS archive:
+The GNSS VTEC service, `hamsci-physics-vtec.service`, downloads Differential
+Code Bias (DCB) files from NASA's CDDIS archive.  DCB corrections improve VTEC
+accuracy because they remove satellite and receiver biases.  CDDIS asks for a
+free NASA Earthdata account.
 
-- **IONEX** (Global Ionosphere Maps) — used by the ionospheric model
-- **DCB** (Differential Code Bias) — used by the VTEC service
+The IONEX download (Global Ionosphere Maps) moved to hf-timestd in v3.96.
+hf-timestd's own docs cover its credentials.
 
-Both require a free NASA Earthdata account.
+## Why You Need It
 
-## Why This Is Needed
-
-IONEX provides global TEC maps for ionospheric delay modeling. DCB corrections
-improve VTEC accuracy by accounting for satellite and receiver biases. Without
-credentials, these downloads fail and the system falls back to parametric models.
+Without credentials the DCB download fails.  The service keeps running but
+assumes zero bias, and its VTEC accuracy suffers.
 
 ## Setup Steps
 
@@ -27,12 +27,16 @@ credentials, these downloads fail and the system falls back to parametric models
 
 ### 2. Configure Authentication
 
-Credentials are stored in a netrc file at `/etc/hamsci-physics/earthdata-netrc`.
-This is the system-wide location used by all hf-timestd services.
+The VTEC service reads its credentials from `/etc/hamsci-physics/earthdata-netrc`;
+its unit sets `NETRC` to that path.
 
-**Option A: During Installation (Recommended)**
+**Option A: Adoption from hf-timestd**
 
-The install script will prompt for your credentials and create the file automatically.
+A station that ran hf-timestd's old `timestd-vtec.service` already has
+`/etc/hf-timestd/earthdata-netrc`.  When sigmond moves the service here, it
+runs `hamsci-physics vtec adopt`, which copies that file to
+`/etc/hamsci-physics/earthdata-netrc` with mode 600 and the same owner.  It
+never overwrites a file already there.
 
 **Option B: Manual Setup**
 
@@ -51,28 +55,23 @@ sudo chmod 600 /etc/hamsci-physics/earthdata-netrc
 
 **Credential Lookup Order:**
 
-The system checks for credentials in this order:
-1. `NETRC` environment variable (set automatically by systemd units)
-2. `/etc/hamsci-physics/earthdata-netrc` (system-wide, recommended)
-3. `~/.netrc` (user home directory, fallback for interactive/dev use)
+The downloader looks for credentials in this order:
+1. the `NETRC` environment variable (the unit sets it)
+2. `/etc/hamsci-physics/earthdata-netrc`
+3. `~/.netrc` (a fallback for interactive and development use)
 
 ### 3. Verify Setup
 
-After creating the credential file, restart the affected services:
+After creating the credential file, restart the service:
 
 ```bash
-sudo systemctl restart timestd-vtec
-sudo systemctl start hamsci-physics-ionex-download
+sudo systemctl restart hamsci-physics-vtec
 ```
 
-Check the logs:
+Check the log:
 
 ```bash
-# VTEC/DCB downloads
-sudo journalctl -u timestd-vtec -n 50 | grep -E "DCB|bias|Download"
-
-# IONEX downloads
-sudo journalctl -u timestd-ionex -n 50
+sudo journalctl -u hamsci-physics-vtec -n 50 | grep -E "DCB|bias|Download"
 ```
 
 You should see:
@@ -104,18 +103,14 @@ If files in `/var/lib/timestd/data/dcb/` are 0 bytes:
 # Remove empty files
 sudo rm /var/lib/timestd/data/dcb/*.BIA
 
-# Restart service to re-download
-sudo systemctl restart timestd-vtec
+# Restart the service to re-download
+sudo systemctl restart hamsci-physics-vtec
 ```
 
-### Services Work Without Credentials
+### The Service Works Without Credentials
 
-Both services degrade gracefully without CDDIS credentials:
-
-- **VTEC**: Runs but assumes zero DCB bias (reduced accuracy)
-- **Ionospheric model**: Falls back to parametric IRI model (no IONEX)
-
-Logs will show warnings like:
+Without CDDIS credentials the VTEC service runs but assumes zero DCB bias,
+which reduces its accuracy.  The log shows:
 
 ```
 Failed to download DCB file. VTEC accuracy will be degraded (0 bias assumed).
@@ -123,21 +118,7 @@ Failed to download DCB file. VTEC accuracy will be degraded (0 bias assumed).
 
 ## Security Notes
 
-- The credential file contains your password in plain text
-- **Must** have `600` permissions (owner read/write only)
-- Stored in `/etc/hamsci-physics/` alongside other system config
-- Consider using a dedicated Earthdata account for this system
-- Rotate password periodically
-
-## Alternative: Disable CDDIS Downloads
-
-If you don't want to set up NASA Earthdata, you can disable downloads:
-
-```toml
-# In /etc/hamsci-physics/config.toml
-[gnss_vtec]
-enabled = true
-download_dcb = false  # Disable DCB downloads
-```
-
-The system will work but with reduced ionospheric correction accuracy.
+- The credential file holds your password in plain text.
+- It **must** have `600` permissions (owner read/write only).
+- Consider a dedicated Earthdata account for the station.
+- Rotate the password from time to time.

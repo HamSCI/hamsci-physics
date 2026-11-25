@@ -10,6 +10,9 @@ Science products:
     grape      — GRAPE/PSWS daily pipeline (decimate → package →
                  spectrograms, if enabled), moved here from hf-timestd in the
                  2026-08-24 split.
+    vtec adopt — copy a station's [gnss_vtec] settings and Earthdata netrc
+                 from hf-timestd into /etc/hamsci-physics (v3.96; sigmond
+                 runs it before it moves timestd-vtec.service here).
 
 The data root stays ``/var/lib/timestd`` — a frozen contract of the
 split: hamsci-physics reads the timing core's data products in place
@@ -283,6 +286,22 @@ def run_timing_gate(data_root, date: str, history_db, *, as_json: bool = False,
     return 1 if rep.overclaims else 0
 
 
+def _handle_vtec_adopt(args) -> int:
+    """`vtec adopt`: two lines, one per file, and never a coordinate."""
+    from datetime import datetime, timezone
+    from .gnss.adopt import adopt_netrc, adopt_vtec
+    try:
+        vtec = adopt_vtec(Path(args.from_config), Path(args.to),
+                          datetime.now(tz=timezone.utc))
+        print(f"gnss-vtec: {vtec} ({args.to})")
+        netrc = adopt_netrc(Path(args.netrc_from), Path(args.netrc_to))
+        print(f"earthdata netrc: {netrc} ({args.netrc_to})")
+    except (OSError, ValueError) as exc:     # ValueError: an unparseable source TOML
+        print(exc)
+        return 1
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog='hamsci-physics',
@@ -362,7 +381,20 @@ def build_parser() -> argparse.ArgumentParser:
     tg.add_argument('--history-db', type=str, default='/var/lib/timestd/authority_history.db')
     tg.add_argument('--json', action='store_true')
 
+    vtec_parser = subparsers.add_parser('vtec', help='GNSS VTEC service')
+    vtec_sub = vtec_parser.add_subparsers(dest='vtec_command', help='VTEC command')
+    adopt = vtec_sub.add_parser(
+        'adopt', help="Copy hf-timestd's [gnss_vtec] and Earthdata netrc here; "
+                      "keeps files that already exist")
+    adopt.add_argument('--from-config', default='/etc/hf-timestd/timestd-config.toml',
+                       help='hf-timestd config to read [gnss_vtec] and [station] from')
+    adopt.add_argument('--to', default='/etc/hamsci-physics/gnss-vtec.toml',
+                       help='gnss-vtec.toml to write')
+    adopt.add_argument('--netrc-from', default='/etc/hf-timestd/earthdata-netrc')
+    adopt.add_argument('--netrc-to', default='/etc/hamsci-physics/earthdata-netrc')
+
     parser._grape_parser = grape_parser
+    parser._vtec_parser = vtec_parser
     return parser
 
 
@@ -390,6 +422,11 @@ def main():
         sys.exit(_handle_inventory(args))
     elif args.command == 'validate':
         sys.exit(_handle_validate(args))
+    elif args.command == 'vtec':
+        if args.vtec_command == 'adopt':
+            sys.exit(_handle_vtec_adopt(args))
+        parser._vtec_parser.print_help()
+        sys.exit(1)
     elif args.command == 'grape':
         # GRAPE data products mode
         from datetime import datetime, timedelta, timezone

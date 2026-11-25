@@ -150,3 +150,22 @@ def test_validate_shape(tmp_path):
     for issue in doc["issues"]:
         assert set(issue) >= {"severity", "instance", "message"}
         assert issue["severity"] in {"fail", "warn", "info"}
+
+
+# ── §17 the GNSS VTEC sink appears only where the service runs ──────────
+
+def test_inventory_declares_gnss_vtec_only_where_it_runs(tmp_path, monkeypatch):
+    from hamsci_physics import contract
+    gnss = tmp_path / "gnss-vtec.toml"
+    monkeypatch.setattr(contract, "GNSS_VTEC_TOML", gnss)
+
+    def vtec_sinks():
+        inv = contract.build_inventory({}, tmp_path / "config.toml")
+        return [s for s in inv["instances"][0]["data_sinks"]
+                if s["target"] == "timestd.L3_gnss_vtec"]
+
+    assert vtec_sinks() == []
+    gnss.write_text("[gnss_vtec]\nenabled = true\n")
+    [sink] = vtec_sinks()
+    assert sink["kind"] == "service" and sink["retention_days"] == 30
+    assert sink["schema_ref"] == "timestd:1"

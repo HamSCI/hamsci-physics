@@ -1,0 +1,43 @@
+# /etc/hamsci-physics/gnss-vtec.toml — the GNSS VTEC service's own file.
+#
+# hamsci-physics-vtec.service starts only when this file exists.  On a
+# station that ran hf-timestd's timestd-vtec.service, `hamsci-physics vtec
+# adopt` wrote it from [gnss_vtec] in /etc/hf-timestd/timestd-config.toml;
+# sigmond-site-timing writes it when it wires a network receiver.  To add a
+# USB receiver by hand, copy this file there, set `device`, and run
+#   sudo systemctl restart hamsci-physics-vtec.service
+# Relative paths below resolve under /var/lib/timestd (the unit's
+# WorkingDirectory).
+
+[gnss_vtec]
+enabled = true
+host = "<YOUR_GNSS_HOST>"               # IP of GNSS receiver or ser2net bridge
+port = 9000                             # GNSS data stream port (UBX or RTCM3)
+# device: a receiver plugged into this machine by USB.  When set it replaces
+# host and port.  Use the stable name, e.g.
+# device = "/dev/serial/by-id/usb-u-blox_AG_-_www.u-blox.com_u-blox_GNSS_receiver-if00"
+# configure_receiver: on a serial device, send one UBX-CFG-VALSET (RAM layer
+# only, never flash) that turns on RXM-RAWX, RXM-SFRBX and NAV-SAT each time the port
+# opens.  Set false to leave the receiver alone.  Ignored for host/port.
+# configure_receiver = true
+# protocol: "auto" (default) decides from the first bytes; "ubx" for a u-blox
+# ZED-F9P (RXM-RAWX + NAV-SAT); "rtcm3" for an RTCM 3.3 base stream such as a
+# Quectel LG290P (MSM7 1077 or legacy 1004, plus 1005 antenna position).  An
+# RTCM receiver sends no ephemeris, so elevations come from BKG's multi-GNSS
+# broadcast file, fetched every 15 min into ephemeris_dir (no login needed).
+protocol = "auto"
+ephemeris_dir = "data/brdc"
+# ephemeris_url = "https://igs.bkg.bund.de/root_ftp/IGS/BRDC/{year}/{doy}/BRDC00WRD_S_{year}{doy}0000_01D_MN.rnx.gz"
+save_csv = false
+csv_path = "data/gnss_vtec.csv"
+save_hdf5 = true
+hdf5_path = "data/gnss_vtec"
+
+# [station]: the antenna position an RTCM3 receiver falls back to when its
+# 1005 message reads zero.  Leave it out and the service takes STATION_LAT /
+# STATION_LON from /etc/sigmond/coordination.env, then the centre of the
+# station's grid square.  A u-blox receiver reports its own position.
+# [station]
+# latitude = 41.6875
+# longitude = -72.7917
+# altitude_m = 0.0

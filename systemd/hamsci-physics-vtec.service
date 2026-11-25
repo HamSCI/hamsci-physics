@@ -1,0 +1,55 @@
+[Unit]
+# Alert (journal breadcrumb via service-alert.sh; email if mailutils present)
+# when this always-restart service finally gives up (StartLimit exhausted).
+# timestd-alert@ ships with hf-timestd, which hamsci-physics requires.
+OnFailure=timestd-alert@%N.service
+Description=HamSCI Physics — GNSS VTEC
+Documentation=https://github.com/HamSCI/hamsci-physics
+# A station without a GNSS receiver has no gnss-vtec.toml; the unit stays
+# enabled but never starts there.  `hamsci-physics vtec adopt` or
+# sigmond-site-timing writes the file.
+ConditionPathExists=/etc/hamsci-physics/gnss-vtec.toml
+After=network.target
+Wants=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=notify
+User=timestd
+Group=timestd
+# Read/write a local USB GNSS receiver ([gnss_vtec] device = /dev/ttyACM*, root:dialout 0660)
+SupplementaryGroups=dialout
+# Operator identity (callsign, grid, STATION_LAT/LON) from sigmond — CLIENT-CONTRACT §14.2
+EnvironmentFile=-/etc/sigmond/coordination.env
+
+# The DCB download authenticates to NASA Earthdata (docs/NASA_EARTHDATA_SETUP.md).
+Environment=NETRC=/etc/hamsci-physics/earthdata-netrc
+Environment=MALLOC_ARENA_MAX=2
+# The relative paths in gnss-vtec.toml (data/gnss_vtec.csv, data/dcb,
+# data/brdc) resolve here, exactly as they did under timestd-vtec.service.
+WorkingDirectory=/var/lib/timestd
+
+# Watchdog: restart if no heartbeat for 60s (6 poll intervals at 10s each)
+WatchdogSec=60
+NotifyAccess=main
+
+ExecStart=/opt/git/sigmond/hamsci-physics/venv/bin/python -u -m hamsci_physics.gnss.vtec_service \
+    --gnss-config /etc/hamsci-physics/gnss-vtec.toml \
+    --config /etc/hamsci-physics/config.toml
+
+# Resource limits
+MemoryMax=400M
+MemorySwapMax=0
+
+# Always restart - VTEC data is important for ionospheric corrections
+Restart=always
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hamsci-physics-vtec
+
+[Install]
+WantedBy=multi-user.target

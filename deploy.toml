@@ -128,6 +128,9 @@ run  = "install -d -o timestd -g timestd -m 0755 /var/lib/timestd/phase2/fusion 
 [systemd]
 units = [
     "hamsci-physics-fusion.service",
+    # GNSS VTEC, moved from hf-timestd's timestd-vtec.service in v3.96.  It starts
+    # only where /etc/hamsci-physics/gnss-vtec.toml exists (ConditionPathExists).
+    "hamsci-physics-vtec.service",
     "grape-daily.timer",
     "hamsci-physics-reanalysis.timer",
     "hamsci-physics-ionex-download.timer",
@@ -138,6 +141,15 @@ units = [
     # retired grape-upload-retry units and `grape upload` were removed
     # 2026-10-01.
 ]
+
+# Decision 10 (v3.96): GNSS VTEC moves from hf-timestd to hamsci-physics.
+# sigmond runs `migrate` first, which copies [gnss_vtec] and the Earthdata
+# netrc into /etc/hamsci-physics; then it stops and disables the old unit;
+# only then does it start the new one.  Two copies never run.
+[[systemd.moves]]
+from    = ["timestd-vtec.service"]
+to      = "hamsci-physics-vtec.service"
+migrate = ["/opt/git/sigmond/hamsci-physics/venv/bin/hamsci-physics", "vtec", "adopt"]
 
 # ---------------------------------------------------------------------------
 # Dependencies.
