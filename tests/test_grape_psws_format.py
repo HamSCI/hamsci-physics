@@ -40,6 +40,9 @@ def test_drf_metadata_keys_are_unchanged(packaged):
     (_, rec), = md.read(lo, hi + 1).items()
     assert sorted(rec) == ["callsign", "center_frequencies", "grid_square", "lat",
                            "long", "receiver_name", "uuid_str"]
+    assert rec["callsign"] == "N0CALL" and rec["grid_square"] == "EM38"
+    # PSWS wants MHz, in channel order
+    assert np.allclose(np.asarray(rec["center_frequencies"], dtype=float), [5.0, 10.0])
 
 
 def test_drf_layout_is_unchanged(packaged):
@@ -48,6 +51,9 @@ def test_drf_layout_is_unchanged(packaged):
     assert lo == int(T0) * 10 and hi - lo + 1 == 864_000
     p = r.get_properties("ch0")
     assert p["samples_per_second"] == 10 and p["is_complex"] and p["num_subchannels"] == 2
+    # f4 per part, complex: digital_rf reads it back as complex64
+    v = r.read_vector(lo, 10, "ch0")
+    assert v.dtype == np.complex64 and v.shape == (10, 2)
 
 
 def test_gap_summary_names_the_decimator(packaged):
