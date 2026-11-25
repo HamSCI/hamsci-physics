@@ -14,7 +14,9 @@ position goes from one root-owned file to another and nowhere else.
 
 from __future__ import annotations
 
+import errno
 import os
+import stat
 import tempfile
 import tomllib
 from datetime import datetime, timezone
@@ -80,16 +82,26 @@ def adopt_vtec(src_config: Path, dst: Path, now: datetime) -> str:
     """Write ``dst`` from ``src_config``'s ``[gnss_vtec]`` table.
 
     Returns ``"kept"`` when ``dst`` already exists (an operator's file is
-    never overwritten), ``"none"`` when there is nothing to adopt (no
+    never overwritten), ``"refused"`` when the source is a symlink or not a regular file,
+    ``"none"`` when there is nothing to adopt (no
     source, no table, ``enabled`` not ``true``, or neither a real host nor
     a device), and ``"written"`` otherwise.
     """
     src_config, dst = Path(src_config), Path(dst)
     if dst.exists():
         return "kept"
-    if not src_config.exists():
+    try:                       # runs as root: never follow a symlink out of the source
+        sfd = os.open(src_config, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
         return "none"
-    text = src_config.read_text()
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return "refused"
+        raise
+    with os.fdopen(sfd, "rb") as sfh:
+        if not stat.S_ISREG(os.fstat(sfh.fileno()).st_mode):
+            return "refused"
+        text = sfh.read().decode()
     config = tomllib.loads(text)
     section = config.get("gnss_vtec") or {}
     if section.get("enabled") is not True:
@@ -126,17 +138,37 @@ def adopt_vtec(src_config: Path, dst: Path, now: datetime) -> str:
 
 def adopt_netrc(src: Path, dst: Path) -> str:
     """Copy the Earthdata netrc: ``"kept"`` when ``dst`` exists, ``"absent"``
-    when ``src`` does not, else ``"copied"`` (mode 0600, ``src``'s owner and
-    group)."""
+    when ``src`` does not, ``"refused"`` when ``src`` is a symlink or not a
+    regular file, else ``"copied"`` (mode 0600, ``src``'s owner and group).
+
+    This runs as root.  The source opens with O_NOFOLLOW and is checked on
+    its descriptor, and the copy's mode and owner go on the temporary file's
+    descriptor, so a service account that owns the source cannot swap in a
+    symlink to a root-only file and read it back."""
     src, dst = Path(src), Path(dst)
     if dst.exists():
         return "kept"
-    if not src.exists():
-        return "absent"
-    st = src.stat()
-    tmp = _write_atomic(dst, src.read_bytes(), 0o600)
     try:
-        os.chown(tmp, st.st_uid, st.st_gid)
+        sfd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return "absent"
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return "refused"
+        raise
+    with os.fdopen(sfd, "rb") as sfh:
+        st = os.fstat(sfh.fileno())
+        if not stat.S_ISREG(st.st_mode):
+            return "refused"
+        data = sfh.read()
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=dst.parent, prefix=f".{dst.name}.")
+    tmp = Path(tmp_name)
+    try:
+        os.fchmod(fd, 0o600)
+        os.fchown(fd, st.st_uid, st.st_gid)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
         os.replace(tmp, dst)
     except BaseException:
         tmp.unlink(missing_ok=True)

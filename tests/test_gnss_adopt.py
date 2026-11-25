@@ -60,3 +60,28 @@ def test_netrc_copy_keeps_mode_and_owner(tmp_path):
     assert (dst.stat().st_uid, dst.stat().st_gid) == (src.stat().st_uid, src.stat().st_gid)
     assert adopt_netrc(src, dst) == "kept"
     assert adopt_netrc(tmp_path / "none", tmp_path / "c") == "absent"
+
+
+def test_netrc_symlinked_source_is_refused_and_nothing_written(tmp_path):
+    secret = tmp_path / "root_only"
+    secret.write_text("TOP SECRET\n")
+    src, dst = tmp_path / "a", tmp_path / "b"
+    src.symlink_to(secret)
+    assert adopt_netrc(src, dst) == "refused"
+    assert not dst.exists()
+    assert not [p for p in tmp_path.iterdir() if p.name.startswith(".b.")]
+
+
+def test_netrc_fifo_source_is_refused(tmp_path):
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    assert adopt_netrc(fifo, tmp_path / "b") == "refused"
+
+
+def test_vtec_symlinked_source_is_refused_and_nothing_written(tmp_path):
+    real = tmp_path / "real.toml"
+    real.write_text("[station]\nlatitude = 41.6875\nlongitude = -72.7917\n" + SRC)
+    src, dst = tmp_path / "t.toml", tmp_path / "gnss-vtec.toml"
+    src.symlink_to(real)
+    assert adopt_vtec(src, dst, NOW) == "refused"
+    assert not dst.exists()

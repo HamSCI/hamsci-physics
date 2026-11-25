@@ -296,6 +296,8 @@ def _handle_vtec_adopt(args) -> int:
         print(f"gnss-vtec: {vtec} ({args.to})")
         netrc = adopt_netrc(Path(args.netrc_from), Path(args.netrc_to))
         print(f"earthdata netrc: {netrc} ({args.netrc_to})")
+        if "refused" in (vtec, netrc):     # a symlinked or special source file
+            return 1
     except (OSError, ValueError) as exc:     # ValueError: an unparseable source TOML
         print(exc)
         return 1
