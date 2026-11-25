@@ -58,6 +58,9 @@ class MinuteMetadata:
     # None on products older than the v2 timing block.
     counter_epoch_id: Optional[str] = None
     origin: Optional[str] = None
+    # True when the minute's samples lie within the decimator's filter
+    # transient (start-up or after a gap), so they carry edge effects.
+    filter_edge: bool = False
 
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -81,6 +84,8 @@ class DayMetadata:
     counter_epochs: int = 0
     origin_switches: int = 0
     epoch_boundaries: List[int] = field(default_factory=list)
+    # Decimator's describe() record; None on days written before v3.96.
+    decimator: Optional[Dict] = None
 
     def update_summary(self):
         """Recompute summary statistics."""
@@ -116,6 +121,7 @@ class DayMetadata:
                 'counter_epochs': self.counter_epochs,
                 'origin_switches': self.origin_switches,
                 'epoch_boundaries': list(self.epoch_boundaries),
+                'decimator': self.decimator,
             }
         }
     
@@ -133,6 +139,7 @@ class DayMetadata:
         meta.valid_minutes = summary.get('valid_minutes', 0)
         meta.total_gap_samples = summary.get('total_gap_samples', 0)
         meta.completeness_pct = summary.get('completeness_pct', 0.0)
+        meta.decimator = summary.get('decimator')
         return meta
 
 
@@ -234,6 +241,7 @@ class DecimatedBuffer:
         gap_samples: int = 0,
         counter_epoch_id: Optional[str] = None,
         origin: Optional[str] = None,
+        filter_edge: bool = False,
     ) -> bool:
         """
         Write one minute of decimated data to buffer.
@@ -309,6 +317,7 @@ class DecimatedBuffer:
                 valid=True,
                 counter_epoch_id=counter_epoch_id,
                 origin=origin,
+                filter_edge=filter_edge,
             ).to_dict()
             self._metadata_dirty.add(date_str)
             
@@ -468,6 +477,20 @@ class DecimatedBuffer:
             logger.debug(f"Caught exception: {e}")
             return None
 
+
+    def set_decimator(self, date_str: str, record: Dict) -> None:
+        """Record the decimator that produced a day (saved by flush_metadata)."""
+        if date_str not in self._metadata_cache:
+            self._metadata_cache[date_str] = self._load_metadata(date_str)
+        self._metadata_cache[date_str].decimator = record
+        self._metadata_dirty.add(date_str)
+
+    def discard_day(self, date_str: str) -> None:
+        """Delete a day's data and metadata files and drop its cache entry."""
+        for path in self._get_paths(date_str):
+            path.unlink(missing_ok=True)
+        self._metadata_cache.pop(date_str, None)
+        self._metadata_dirty.discard(date_str)
 
     def flush_metadata(self):
         """Flush all dirty metadata to disk. Call after a batch of write_minute() calls."""
