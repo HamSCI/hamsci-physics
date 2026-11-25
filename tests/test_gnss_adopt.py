@@ -85,3 +85,19 @@ def test_vtec_symlinked_source_is_refused_and_nothing_written(tmp_path):
     src.symlink_to(real)
     assert adopt_vtec(src, dst, NOW) == "refused"
     assert not dst.exists()
+
+N8UR_DEVICE = "/dev/serial/by-id/usb-u-blox_AG_-_www.u-blox.com_u-blox_GNSS_receiver-if00"
+
+def test_placeholder_host_with_a_device_is_adopted(tmp_path):
+    # N8UR's shape: the template's host placeholder never filled in, a USB device set.
+    src, dst = tmp_path / "t.toml", tmp_path / "gnss-vtec.toml"
+    src.write_text(SRC.replace('host = "192.0.2.10"',
+                               f'host = "<YOUR_GNSS_HOST>"\ndevice = "{N8UR_DEVICE}"'))
+    assert adopt_vtec(src, dst, NOW) == "written"
+    assert f'device = "{N8UR_DEVICE}"' in dst.read_text()
+
+def test_placeholder_host_and_placeholder_device_write_nothing(tmp_path):
+    src, dst = tmp_path / "t.toml", tmp_path / "gnss-vtec.toml"
+    src.write_text(SRC.replace('host = "192.0.2.10"',
+                               'host = "<YOUR_GNSS_HOST>"\ndevice = "<YOUR_GNSS_DEVICE>"'))
+    assert adopt_vtec(src, dst, NOW) == "none" and not dst.exists()

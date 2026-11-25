@@ -183,3 +183,10 @@ def test_reopen_after_serialexception_resends_config():
     assert all(p.written == [gs.build_receiver_config()] for p in ports)
     assert ports[0].closed
 
+
+
+def test_make_source_device_wins_over_a_placeholder_host():
+    # N8UR: [gnss_vtec] kept the template's host placeholder and set a USB device.
+    dev = "/dev/serial/by-id/usb-u-blox_AG_-_www.u-blox.com_u-blox_GNSS_receiver-if00"
+    s = gs.make_source({'host': '<YOUR_GNSS_HOST>', 'port': 9000, 'device': dev})
+    assert isinstance(s, gs.SerialSource) and s.device == dev

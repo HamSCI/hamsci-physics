@@ -50,12 +50,12 @@ def extract_table(text: str, table: str) -> Optional[str]:
     return "\n".join(body) + "\n"
 
 
-def _real_host(host) -> bool:
-    return isinstance(host, str) and bool(host.strip()) and "<" not in host
+def _filled_in(value) -> bool:
+    """A non-empty string that is not a template placeholder like
+    ``"<YOUR_GNSS_HOST>"``.  A section counts as wired when its host OR its
+    device passes: N8UR kept the host placeholder and set a USB device."""
+    return isinstance(value, str) and bool(value.strip()) and "<" not in value
 
-
-def _real_device(device) -> bool:
-    return isinstance(device, str) and bool(device.strip())
 
 
 def _nonzero(v) -> bool:
@@ -106,7 +106,7 @@ def adopt_vtec(src_config: Path, dst: Path, now: datetime) -> str:
     section = config.get("gnss_vtec") or {}
     if section.get("enabled") is not True:
         return "none"
-    if not (_real_host(section.get("host")) or _real_device(section.get("device"))):
+    if not (_filled_in(section.get("host")) or _filled_in(section.get("device"))):
         return "none"
     table = extract_table(text, "gnss_vtec")
     if table is None:          # tomllib saw it as a dotted key or inline table
