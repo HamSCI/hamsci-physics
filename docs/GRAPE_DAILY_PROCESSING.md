@@ -53,17 +53,23 @@ The daily job processes **yesterday's data** through the following pipeline:
    - Enumerates all 1440 expected minutes per day explicitly (no gaps missed at day boundaries)
    - Single `StatefulDecimator` per channel preserves filter state across minutes
    - Multi-stage: CIC (R=60) → compensation FIR → final FIR (R=40)
+   - The final FIR is a Kaiser design, 2,427 taps at 24 kHz input. It rejects at least 90 dB from 6 Hz (94.6 dB measured) and stays flat within 0.1 dB across 0-5 Hz
+   - The decimator removes its own group delay (3.115 s). Each 10 Hz sample belongs to the instant its index names
+   - Borrows one minute from each neighbouring day, so the filter has history at the day's edges
+   - Marks `filter_edge: true` in the day's `_meta.json` for each minute beside a gap, a counter-epoch change, or an unborrowed day edge. Those minutes carry filter settling
    - Outputs to `/var/lib/timestd/products/{CHANNEL}/decimated/`
 
-2. **Spectrograms** - Generate carrier spectrograms
+2. **Package** - Package as Digital RF
+   - Creates DRF packages for PSWS
+   - Outputs to `upload/{YYYYMMDD}/{CALLSIGN}_{GRID}/{RECEIVER}@{ID}/OBS.../ch0/`
+
+3. **Spectrograms** - Generate carrier spectrograms (optional)
+   - Draws only when `/etc/hamsci-physics/config.toml` sets `spectrograms = true` under `[grape]`
+   - Runs after packaging. A failure here never blocks packaging or the handoff
    - Creates daily spectrograms for all configured channels
    - Edge tapering at gap boundaries (half-cosine, 5s) replaces zero interpolation
    - Full-window validity masking: any NFFT=512 window overlapping a gap is NaN-masked
    - Outputs to `/var/lib/timestd/products/{CHANNEL}/spectrograms/`
-
-3. **Package** - Package as Digital RF
-   - Creates DRF packages for PSWS
-   - Outputs to `upload/{YYYYMMDD}/{CALLSIGN}_{GRID}/{RECEIVER}@{ID}/OBS.../ch0/`
 
 The job uploads nothing.  hs-uploader's `grape-psws` pipeline picks the `OBS*`
 datasets up from `upload/` and ships them to PSWS.

@@ -71,7 +71,7 @@ so a `git pull` of either propagates without a reinstall.
 hamsci-physics version --json
 hamsci-physics inventory --json    # what this client is and writes
 hamsci-physics validate --json     # exit 1 on any fail-severity issue
-hamsci-physics grape daily         # decimate → spectrogram → package → upload
+hamsci-physics grape daily         # decimate → package → (spectrogram, if enabled)
 ```
 
 ## Status

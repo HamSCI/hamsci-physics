@@ -7,8 +7,8 @@ Contract surface (sigmond CLIENT-CONTRACT §16 non-radiod client):
     validate   — self-check of config + data paths (--json)
 
 Science products:
-    grape      — GRAPE/PSWS daily pipeline (decimate → spectrogram →
-                 package → upload), moved here from hf-timestd in the
+    grape      — GRAPE/PSWS daily pipeline (decimate → package →
+                 spectrograms, if enabled), moved here from hf-timestd in the
                  2026-08-24 split.
 
 The data root stays ``/var/lib/timestd`` — a frozen contract of the
@@ -311,11 +311,11 @@ def build_parser() -> argparse.ArgumentParser:
     grape_subparsers = grape_parser.add_subparsers(dest='grape_command', help='GRAPE command')
     
     # GRAPE daily (full orchestrated pipeline)
-    grape_daily_parser = grape_subparsers.add_parser('daily', help='Run full daily pipeline: decimate → spectrogram → package (hs-uploader ships it)')
+    grape_daily_parser = grape_subparsers.add_parser('daily', help='Run full daily pipeline: decimate → package → (spectrograms, if enabled); hs-uploader ships it')
     grape_daily_parser.add_argument('--data-root', default='/var/lib/timestd', help='Data root directory')
     grape_daily_parser.add_argument('--config', '-c', default=DEFAULT_CONFIG, help='Config file')
     grape_daily_parser.add_argument('--date', help='Date (YYYY-MM-DD or YYYYMMDD, default: yesterday)')
-    grape_daily_parser.add_argument('--no-upload', action='store_true', help='Skip upload stage (decimate, spectrogram, package only)')
+    grape_daily_parser.add_argument('--no-upload', action='store_true', help='Skip upload stage (decimate, package, and spectrograms if enabled)')
     grape_daily_parser.add_argument('--debug', '-d', action='store_true', help='Enable DEBUG logging')
 
     # GRAPE decimate
@@ -549,7 +549,7 @@ def main():
             # After packaging, and never a gate: the upload does not wait on them.
             pipeline_status['spectrograms_enabled'] = _spectrograms_enabled(config)
             if pipeline_status['spectrograms_enabled']:
-                print(f"\n━━━ Spectrograms ({len(decimated)} channels) ━━━")
+                print(f"\n━━━ Stage 3: Spectrograms ({len(decimated)} channels) ━━━")
             drawn = _run_spectrogram_stage(config, data_root, decimated, date_str, grid)
             if pipeline_status['spectrograms_enabled']:
                 pipeline_status['channels_spectrogram'] = len(drawn)

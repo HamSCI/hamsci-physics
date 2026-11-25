@@ -43,6 +43,21 @@ boundary the decimation pipeline builds a fresh `StatefulDecimator`, so no
 filter history spans a re-based counter. Legacy sidecars carry no epoch
 and decode exactly as before.
 
+## Where the 10 Hz samples stand
+
+Each 10 Hz output sample belongs to the instant its index names. The
+decimator removes its own group delay (3.115 s with the version 2 filter),
+so no reader needs to shift the samples.
+
+Each day's `_meta.json` summary carries a `decimator` record: name
+`grape-cic-fir`, version 2, and the filter's design values. The shipped
+`gap_summary.json` repeats that record for each channel. A product without
+the record came from version 1. Its samples sit 0.582 s after their labels,
+and its filter rejected 6 Hz by only 22 dB.
+
+The Digital RF itself carries no such record. PSWS rejects unexpected DRF
+metadata, so the record travels in the sidecar files only.
+
 ## Where the chain sidecar lands, and why not in the payload
 
 `hamsci-physics grape timing-chain` writes
