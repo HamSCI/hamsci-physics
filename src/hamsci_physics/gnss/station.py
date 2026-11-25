@@ -52,4 +52,4 @@ def station_ecef(config: dict, environ: Mapping[str, str]) -> Optional[Ecef]:
     pos = _from_latlon(environ.get("STATION_LAT"), environ.get("STATION_LON"))
     if pos is not None:
         return pos
-    return _grid_ecef(st.get("grid_square") or environ.get("STATION_GRID"))
+    return _grid_ecef(st.get("grid_square")) or _grid_ecef(environ.get("STATION_GRID"))

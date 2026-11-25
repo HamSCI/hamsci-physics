@@ -33,6 +33,11 @@ def test_template_zeroes_fall_to_the_grid_centre():
     assert _deg(pos) == pytest.approx((LAT, LON), abs=1e-6)
 
 
+def test_placeholder_config_grid_does_not_hide_the_environment_grid():
+    pos = station_ecef({"station": {"grid_square": "<YOUR_GRID>"}}, {"STATION_GRID": GRID})
+    assert _deg(pos) == pytest.approx((LAT, LON), abs=1e-6)
+
+
 @pytest.mark.parametrize("cfg,env", [({}, {}), ({"station": {"grid_square": "<YOUR_GRID>"}}, {}),
                                       ({}, {"STATION_LAT": "95", "STATION_LON": "0"})])
 def test_no_usable_position_is_none(cfg, env):

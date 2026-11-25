@@ -215,8 +215,8 @@ class RTCM3Adapter:
                     self.station_ecef, self._pos_source = arp, 'rtcm'
                 else:
                     if not self.implausible_arp:
-                        logger.warning("RTCM %s antenna position %s is not near the Earth's surface "
-                                       "(not a surveyed base?); ignored%s", ident, arp,
+                        logger.warning("RTCM %s antenna position is not near the Earth's surface "
+                                       "(not a surveyed base?); ignored%s", ident,
                                        "; using the configured station position"
                                        if self._pos_source == 'config' else "")
                     self.implausible_arp += 1

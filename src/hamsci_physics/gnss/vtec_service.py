@@ -43,7 +43,6 @@ import logging
 import time
 import sys
 import argparse
-from datetime import datetime
 from collections import deque
 import math
 
