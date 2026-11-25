@@ -137,25 +137,29 @@ FAIL_MARK = 7.0
 
 
 class _FailingDecimator(StatefulDecimator):
-    """Runs the real filters but reports a numerical failure for any minute
-    whose first sample carries FAIL_MARK, as process() does on an exception."""
+    """The real decimator, whose filters raise on any input whose first
+    sample carries FAIL_MARK.  process() then returns None through its own
+    except branch, leaving the stream's bookkeeping as a real failure does."""
 
-    def process(self, iq_samples):
-        out = super().process(iq_samples)
+    def _filter(self, iq_samples):
         if len(iq_samples) and iq_samples[0] == FAIL_MARK:
-            return None
-        return out
+            raise FloatingPointError("injected numerical failure")
+        return super()._filter(iq_samples)
 
 
 def test_a_failed_minute_is_a_gap_and_shifts_no_later_label(tmp_path, monkeypatch):
-    # minutes 10..14 present; minute 12 fails in the decimator; impulse at 00:13:30
+    # minutes 10..14 present; minute 12 fails in the decimator.  Impulses at
+    # 00:11:58 (in the 31 samples the flush returns for minute 11) and 00:13:30.
     bad = np.zeros(N, np.complex64)
     bad[0] = FAIL_MARK
-    _install_reader(monkeypatch, [10, 11, 12, 13, 14], signal_of={12: bad, 13: _impulse_at(30)})
+    _install_reader(monkeypatch, [10, 11, 12, 13, 14],
+                    signal_of={11: _impulse_at(58), 12: bad, 13: _impulse_at(30)})
     monkeypatch.setattr(decimation_pipeline, "StatefulDecimator", _FailingDecimator)
     day, meta = _run(tmp_path)
     m = meta["minutes"]
-    assert int(np.argmax(np.abs(day))) == (13 * 60 + 30) * 10
+    assert 11 * 600 + int(np.argmax(np.abs(day[11 * 600:12 * 600]))) == (11 * 60 + 58) * 10
+    assert 13 * 600 + int(np.argmax(np.abs(day[13 * 600:14 * 600]))) == (13 * 60 + 30) * 10
+    assert int(np.argmax(np.abs(day))) in ((11 * 60 + 58) * 10, (13 * 60 + 30) * 10)
     assert "12" not in m
     assert [m[str(k)]["filter_edge"] for k in (10, 11, 13, 14)] == [True, True, True, True]
     assert not day[12 * 600:13 * 600].any()
