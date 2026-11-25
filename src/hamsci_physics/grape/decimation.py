@@ -26,7 +26,7 @@ Multi-stage decimation splits the problem:
 
 Each stage has relaxed filter requirements:
     Stage 1: 24 kHz → 400 Hz, transition at 200 Hz (0.8% of Nyquist) → ~100 taps
-    Stage 2: 400 Hz → 10 Hz, transition at 5 Hz (2.5% of Nyquist) → ~200 taps
+    Stage 2: 400 Hz → 10 Hz, transition at 5 Hz (2.5% of Nyquist) → 2,427 taps
 
 TOTAL COMPUTATION: ~300 multiplies/sample vs ~100,000 for single-stage
 
@@ -135,11 +135,11 @@ SIGNAL FLOW
            │
            ▼
     ┌──────────────────────────────────────────────────────────────────────┐
-    │ STAGE 2b: Final FIR + Decimate (R=40, ~200 taps)                     │
+    │ STAGE 2b: Final FIR + Decimate (R=40, 2,427 taps)                    │
     │   - Input:  400 Hz                                                   │
     │   - Output: 10 Hz                                                    │
     │   - Sharp cutoff at 5 Hz (Nyquist)                                   │
-    │   - Stopband > 90 dB (aliasing prevention)                           │
+    │   - Kaiser FIR, 2,427 taps at 24 kHz input, ≥ 90 dB from 6 Hz        │
     └──────────────────────────────────────────────────────────────────────┘
            │
            ▼
@@ -166,19 +166,21 @@ DESIGN GOALS
 ================================================================================
 USAGE
 ================================================================================
-    from hamsci_physics.grape.decimation import decimate_for_upload
+    from hamsci_physics.grape.decimation import StatefulDecimator
     
     # 60 seconds of 24 kHz IQ data
     iq_24k = np.random.randn(1440000) + 1j*np.random.randn(1440000)
     
-    # Decimate to 10 Hz
-    iq_10hz = decimate_for_upload(iq_24k, input_rate=24000, output_rate=10)
+    # Decimate to 10 Hz; the decimator keeps filter state between calls
+    decimator = StatefulDecimator(input_rate=24000, output_rate=10)
+    iq_10hz = decimator.process(iq_24k)
     
     print(len(iq_10hz))  # 600 samples (60 seconds × 10 Hz)
 
 ================================================================================
 REVISION HISTORY
 ================================================================================
+2026-11-25: Kaiser normalisation fixed, tap cap removed (was 22 dB at 6 Hz)
 2025-12-07: Added comprehensive theoretical documentation
 2025-11-01: Added support for 16 kHz input (legacy compatibility)
 2025-10-15: Initial implementation with 3-stage pipeline
@@ -215,6 +217,10 @@ SUPPORTED_INPUT_RATES: Dict[int, Dict] = {
 OUTPUT_RATE = 10  # Fixed 10 Hz output for GRAPE
 INTERMEDIATE_RATE = 400  # 400 Hz intermediate (after CIC)
 FINAL_FIR_DECIMATION = 40  # 400 / 40 = 10 Hz
+FINAL_FIR_PASSBAND_HZ = 5.0
+FINAL_FIR_STOPBAND_HZ = 6.0
+FINAL_FIR_DESIGN_DB = 95.0
+ALIAS_REJECTION_FLOOR_DB = 90.0  # required from 6 Hz to 200 Hz
 
 
 def _design_cic_filter(decimation_factor: int, order: int = 4) -> dict:
@@ -418,240 +424,52 @@ def _design_compensation_fir(sample_rate: int, passband_width: float,
     return taps
 
 
-def _design_final_fir(sample_rate: int, cutoff: float, 
-                     transition_width: float = 1.0,
-                     stopband_attenuation_db: float = 90) -> np.ndarray:
+def _design_final_fir(sample_rate: int = 400,
+                      passband_hz: float = FINAL_FIR_PASSBAND_HZ,
+                      stopband_hz: float = FINAL_FIR_STOPBAND_HZ,
+                      stopband_attenuation_db: float = FINAL_FIR_DESIGN_DB
+                      ) -> np.ndarray:
     """
-    Design sharp anti-aliasing FIR filter for final decimation stage.
-    
-    THEORY: ANTI-ALIASING REQUIREMENT
-    ----------------------------------
-    Before decimating by factor R, all frequency content above the new
-    Nyquist frequency must be attenuated to prevent aliasing:
-    
-        New Nyquist = (sample_rate / R) / 2 = 400 / 40 / 2 = 5 Hz
-        
-    Any signal above 5 Hz will fold back into 0-5 Hz after decimation.
-    We need > 90 dB attenuation to make aliases below the noise floor.
-    
-    SPECIFICATION:
-    --------------
-        Passband:   0 - 5 Hz (flat, < 0.1 dB ripple)
-        Transition: 5 - 6 Hz (as sharp as possible)
-        Stopband:   > 6 Hz (> 90 dB attenuation)
-    
-    DESIGN METHOD: Kaiser Window
-    ----------------------------
-    The Kaiser window provides near-optimal (Chebyshev sense) trade-off
-    between main lobe width and side lobe level.
-    
-    Key equations:
-        β = Kaiser shape parameter (controls side lobe level)
-        N = filter length ≈ (A - 8) / (2.285 × Δω)
-        
-    Where:
-        A = stopband attenuation in dB (90)
-        Δω = transition width in radians/sample = 2π × (transition_width/sample_rate)
-    
-    For our specs (A=90 dB, Δf=1 Hz at 400 Hz):
-        Δω = 2π × (1/400) = 0.0157 rad/sample
-        N ≈ (90 - 8) / (2.285 × 0.0157) ≈ 229 taps
-    
-    WHY 90 dB STOPBAND?
-    -------------------
-    - 16-bit audio: ~96 dB dynamic range → aliases below quantization noise
-    - 24-bit audio: ~144 dB dynamic range → aliases still ~50 dB below noise
-    - Higher attenuation (>100 dB) provides diminishing returns
-    
+    Design the sharp anti-aliasing FIR for the final 400 Hz to 10 Hz stage.
+
+    Before decimating by 40, everything above the new Nyquist (5 Hz) must
+    fall below the noise.  The filter passes 0 to 5 Hz and attenuates
+    everything from 6 Hz to Nyquist (200 Hz) by at least
+    ALIAS_REJECTION_FLOOR_DB (90 dB); it is designed at 95 dB for margin.
+
+    Method: Kaiser window.  signal.kaiserord takes the transition width
+    as a fraction of Nyquist (sample_rate / 2) and returns the length and
+    beta for the requested attenuation.  The length is forced odd (type I,
+    linear phase, integer group delay).  No cap: at the defaults the
+    design needs 2,427 taps.
+
     Args:
-        sample_rate: Current sample rate (400 Hz)
-        cutoff: Passband edge frequency (5 Hz for 10 Hz output Nyquist)
-        transition_width: Width of transition band in Hz (1 Hz = 5-6 Hz band)
-        stopband_attenuation_db: Required stopband rejection (90 dB typical)
-        
+        sample_rate: Sample rate at the filter input (400 Hz)
+        passband_hz: Passband edge (5 Hz)
+        stopband_hz: Stopband edge (6 Hz)
+        stopband_attenuation_db: Design attenuation (95 dB)
+
     Returns:
-        FIR filter coefficients (real-valued, symmetric for linear phase)
-        
-    Reference:
-        Kaiser, J.F. (1974). IEEE Int. Symp. Circuits and Systems.
-        Oppenheim & Schafer (2010). "Discrete-Time Signal Processing," 3rd ed.
+        FIR coefficients (real, symmetric, odd length)
     """
-    # Calculate filter order for required attenuation
-    # Kaiser window provides excellent control over stopband
-    # Formula: N ≈ (stopband_db - 8) / (2.285 * transition_width / fs)
-    transition_normalized = transition_width / sample_rate
-    num_taps = int(np.ceil((stopband_attenuation_db - 8) / (2.285 * 2 * np.pi * transition_normalized))) + 1
-    
-    # Ensure odd number of taps (symmetric, linear phase)
-    if num_taps % 2 == 0:
-        num_taps += 1
-    
-    # Limit maximum taps for computational efficiency
-    num_taps = min(num_taps, 401)
-    
-    # Design using Kaiser window (optimal for given specs)
-    beta = signal.kaiser_beta(signal.kaiser_atten(num_taps, transition_normalized))
-    taps = signal.firwin(num_taps, cutoff, window=('kaiser', beta), 
-                        fs=sample_rate, scale=True)
-    
-    logger.debug(f"Final FIR: {num_taps} taps, cutoff={cutoff} Hz, "
-                f"stopband={stopband_attenuation_db} dB")
+    numtaps, beta = signal.kaiserord(
+        stopband_attenuation_db, (stopband_hz - passband_hz) / (sample_rate / 2))
+    if numtaps % 2 == 0:
+        numtaps += 1
+    taps = signal.firwin(numtaps, (passband_hz + stopband_hz) / 2,
+                         window=('kaiser', beta), fs=sample_rate, scale=True)
+    logger.debug(f"Final FIR: {numtaps} taps, passband={passband_hz} Hz, "
+                 f"stopband={stopband_hz} Hz, design={stopband_attenuation_db} dB")
     return taps
 
 
-def decimate_for_upload(iq_samples: np.ndarray, input_rate: int = 20000, 
-                        output_rate: int = 10) -> Optional[np.ndarray]:
-    """
-    Multi-stage optimized decimation: 24 kHz → 10 Hz (factor 2400)
-    Also supports legacy 20 kHz (factor 2000) and 16 kHz (factor 1600).
-    
-    Three-stage pipeline preserving Doppler precision:
-    - 24 kHz: CIC R=60 (24000→400 Hz) + Comp FIR + Final FIR R=40 (400→10 Hz)
-    - 20 kHz: CIC R=50 (20000→400 Hz) + Comp FIR + Final FIR R=40 (400→10 Hz)
-    
-    Args:
-        iq_samples: Complex IQ samples at input_rate
-        input_rate: Input sample rate (Hz) - 24000 (default), 20000, or 16000
-        output_rate: Output sample rate (Hz) - must be 10
-        
-    Returns:
-        Decimated complex IQ samples at output_rate (10 Hz)
-        Returns None if input too short or rates unsupported
-        
-    Example:
-        >>> iq_24k = np.random.randn(1440000) + 1j*np.random.randn(1440000)  # 60 seconds
-        >>> iq_10hz = decimate_for_upload(iq_24k, 24000, 10)
-        >>> len(iq_10hz)
-        600  # 60 seconds at 10 Hz
-    """
-    # Validate parameters
-    if output_rate != OUTPUT_RATE:
-        raise ValueError(f"Output rate must be {OUTPUT_RATE} Hz (got {output_rate})")
-    
-    # Check if input rate is supported
-    if input_rate not in SUPPORTED_INPUT_RATES:
-        supported = ', '.join(f"{r} Hz" for r in sorted(SUPPORTED_INPUT_RATES.keys()))
-        raise ValueError(
-            f"Unsupported input rate: {input_rate} Hz. "
-            f"Supported rates: {supported}. "
-            f"To add a new rate, update SUPPORTED_INPUT_RATES in decimation.py."
-        )
-    
-    rate_config = SUPPORTED_INPUT_RATES[input_rate]
-    cic_decimation = rate_config['cic_decimation']
-    expected_factor = rate_config['total_factor']
-    
-    total_factor = input_rate // output_rate
-    if total_factor != expected_factor:
-        raise ValueError(f"Total decimation factor must be {expected_factor} (got {total_factor})")
-    
-    # Check minimum length
-    # CIC needs at least R samples, compensation FIR needs its length, final FIR needs its length
-    min_length = 1000  # Conservative minimum for 60-second files
-    if len(iq_samples) < min_length:
-        logger.warning(f"Input too short for decimation: {len(iq_samples)} < {min_length} samples")
-        return None
-    
-    logger.debug(f"Starting 3-stage decimation: {len(iq_samples)} samples @ {input_rate} Hz")
-    
-    try:
-        # STAGE 1: CIC Filter (input_rate → 400 Hz)
-        cic_params = _design_cic_filter(decimation_factor=cic_decimation, order=4)
-        iq_400hz = _apply_cic_filter(iq_samples, cic_params)
-        logger.debug(f"After CIC (R={cic_decimation}): {len(iq_400hz)} samples @ 400 Hz")
-        
-        # STAGE 2: Compensation FIR (400 Hz, R=1)
-        # Flatten ±5 Hz passband (corrects CIC droop)
-        comp_taps = _design_compensation_fir(
-            sample_rate=400,
-            passband_width=5.0,  # ±5 Hz for Doppler measurements
-            cic_order=4,
-            cic_decimation=cic_decimation,
-            num_taps=63
-        )
-        iq_400hz_flat = signal.lfilter(comp_taps, [1.0], iq_400hz)
-        logger.debug(f"After compensation FIR: {len(iq_400hz_flat)} samples @ 400 Hz")
-        
-        # STAGE 3: Final FIR + Decimation (400 Hz → 10 Hz, R=40)
-        final_taps = _design_final_fir(
-            sample_rate=400,
-            cutoff=5.0,  # Nyquist for 10 Hz output
-            transition_width=1.0,  # 5-6 Hz transition
-            stopband_attenuation_db=90
-        )
-        iq_filtered = signal.lfilter(final_taps, [1.0], iq_400hz_flat)
-        iq_10hz = iq_filtered[::40]  # Decimate by 40
-        
-        logger.debug(f"After final FIR+decimate: {len(iq_10hz)} samples @ 10 Hz")
-        logger.info(f"✅ Decimation complete: {len(iq_samples)} @ {input_rate} Hz → "
-                   f"{len(iq_10hz)} @ {output_rate} Hz (factor {total_factor})")
-        
-        return iq_10hz
-        
-    except Exception as e:
-        logger.error(f"Decimation failed: {e}")
-        return None
+def stopband_rejection_db(taps: np.ndarray, sample_rate: float,
+                          stopband_hz: float, n_points: int = 8192) -> float:
+    """Smallest attenuation (positive dB) from stopband_hz to sample_rate / 2."""
+    _, h = signal.freqz(taps, worN=np.linspace(stopband_hz, sample_rate / 2, n_points),
+                        fs=sample_rate)
+    return float(-20 * np.log10(np.max(np.abs(h))))
 
-
-def decimate_for_upload_simple(iq_samples: np.ndarray, input_rate: int = 20000,
-                               output_rate: int = 10) -> Optional[np.ndarray]:
-    """
-    Simple fallback decimation using scipy.signal.decimate
-    
-    Use this if the optimized version has issues.
-    - 24 kHz: Stages 10×10×24 = 2400
-    - 20 kHz: Stages 10×10×20 = 2000
-    - 16 kHz: Stages 10×10×16 = 1600
-    
-    Args:
-        iq_samples: Complex IQ samples at input_rate
-        input_rate: Input sample rate (Hz) - 20000 or 16000
-        output_rate: Output sample rate (Hz) - must be 10
-        
-    Returns:
-        Decimated complex IQ samples at output_rate
-    """
-    if input_rate % output_rate != 0:
-        raise ValueError(f"Input rate {input_rate} must be integer multiple of output rate {output_rate}")
-    
-    total_factor = input_rate // output_rate
-    
-    if total_factor == 1:
-        return iq_samples
-    
-    min_length = 100
-    if len(iq_samples) < min_length:
-        logger.warning(f"Input too short: {len(iq_samples)} < {min_length} samples")
-        return None
-    
-    try:
-        # Stage 1: input → input/10 Hz (factor 10)
-        # 20000 → 2000 Hz or 16000 → 1600 Hz
-        if total_factor >= 10:
-            iq_samples = signal.decimate(iq_samples, q=10, ftype='iir', zero_phase=True)
-            total_factor //= 10
-        
-        # Stage 2: → /10 Hz (factor 10)
-        # 2000 → 200 Hz or 1600 → 160 Hz
-        if total_factor >= 10:
-            iq_samples = signal.decimate(iq_samples, q=10, ftype='iir', zero_phase=True)
-            total_factor //= 10
-        
-        # Stage 3: → 10 Hz (factor 20 for 20kHz, factor 16 for 16kHz)
-        # 200 → 10 Hz (factor 20) or 160 → 10 Hz (factor 16)
-        if total_factor >= 16:
-            iq_samples = signal.decimate(iq_samples, q=total_factor, ftype='iir', zero_phase=True)
-            total_factor = 1
-        
-        # Handle any remaining factor
-        if total_factor > 1:
-            iq_samples = signal.decimate(iq_samples, q=total_factor, ftype='iir', zero_phase=True)
-        
-        return iq_samples
-        
-    except Exception as e:
-        logger.error(f"Simple decimation failed: {e}")
-        return None
 
 
 class StatefulDecimator:
@@ -710,12 +528,7 @@ class StatefulDecimator:
             num_taps=63
         )
         
-        self.final_taps = _design_final_fir(
-            sample_rate=400,
-            cutoff=5.0,
-            transition_width=1.0,
-            stopband_attenuation_db=90
-        )
+        self.final_taps = _design_final_fir(sample_rate=400)
         
         # Initialize filter states
         self.reset()
@@ -795,11 +608,6 @@ class StatefulDecimator:
             return None
 
 
-# Module configuration - easy to swap implementations
-DECIMATION_FUNCTION = decimate_for_upload  # Use optimized version
-# DECIMATION_FUNCTION = decimate_for_upload_simple  # Uncomment for simple fallback
-
-
 def get_supported_rates() -> Dict[int, Dict]:
     """
     Get dictionary of supported input sample rates.
@@ -816,25 +624,3 @@ def get_supported_rates() -> Dict[int, Dict]:
 def is_rate_supported(input_rate: int) -> bool:
     """Check if an input sample rate is supported for decimation."""
     return input_rate in SUPPORTED_INPUT_RATES
-
-
-def get_decimator(input_rate: int, output_rate: int):
-    """
-    Factory function to get appropriate decimator
-    
-    Returns a configured decimation function for the given rates.
-    
-    Args:
-        input_rate: Input sample rate (Hz) - see SUPPORTED_INPUT_RATES
-        output_rate: Output sample rate (Hz) - must be 10
-    
-    Returns:
-        Callable that decimates from input_rate to output_rate
-        
-    Raises:
-        ValueError: If input_rate is not supported
-    """
-    def decimator(samples: np.ndarray) -> Optional[np.ndarray]:
-        return DECIMATION_FUNCTION(samples, input_rate, output_rate)
-    
-    return decimator

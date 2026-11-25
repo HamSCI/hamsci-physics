@@ -8,12 +8,11 @@ Handles Phase 3 data products for HF time standard analysis:
 - PSWS upload
 """
 
-from .decimation import decimate_for_upload, StatefulDecimator
+from .decimation import StatefulDecimator
 from .decimation_pipeline import DecimationPipeline
 from .decimated_buffer import DecimatedBuffer
 
 __all__ = [
-    'decimate_for_upload',
     'StatefulDecimator',
     'DecimationPipeline',
     'DecimatedBuffer',
