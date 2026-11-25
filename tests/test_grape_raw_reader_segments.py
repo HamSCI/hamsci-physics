@@ -105,3 +105,23 @@ def test_copy_matches_hf_timestd():
     np.testing.assert_array_equal(x, [1, 1, 1, 1, 1, 1, 2, 2])
     assert meta["segments"][1]["samples_refused"] == 2
     assert meta["segments"][1]["start_rtp_offset_samples"] == -6
+
+
+def test_a_chunk_is_decoded_once_for_its_ten_minutes(tmp_path, monkeypatch):
+    """Each minute used to decompress the whole ten-minute chunk again
+    (AC0G-B4, 2026-11-25: 55 min of CPU per channel-day)."""
+    first, seg2 = _restart_at(n_first=4 * 60 * RATE, n_gap=0)
+    day = _channel(tmp_path) / DAY
+    _write(day, str(CHUNK), first)
+    _write(day, f"{CHUNK}.seg2", seg2)
+    _write(day, str(CHUNK + 600), np.full(600 * RATE, 3, np.complex64))
+    r = RawBinaryReader(tmp_path, "WWV 10000", hot_buffer_root=tmp_path / "no-hot")
+    reads = []
+    real = r._try_read_file
+    monkeypatch.setattr(r, "_try_read_file",
+                        lambda d, stem: (reads.append(stem), real(d, stem))[1])
+    out = [r.read_minute(CHUNK + 60 * i)[0] for i in range(20)]
+    assert reads == [str(CHUNK), f"{CHUNK}.seg2", str(CHUNK + 600)]
+    assert np.all(out[0] == 1) and np.all(out[9] == 2) and np.all(out[10] == 3)
+    out[10][:] = 0                     # a caller's slice is its own copy
+    assert np.all(r.read_minute(CHUNK + 660)[0] == 3)

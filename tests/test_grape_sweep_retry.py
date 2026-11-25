@@ -89,3 +89,21 @@ def test_child_nonzero_exit_is_not_fatal(monkeypatch):
     """Per-day failures are non-fatal by design; only that day is lost."""
     rec = _Recorder(returncode=1)
     _run(monkeypatch, rec)          # must not raise
+
+
+def test_driver_runs_every_day_in_a_child(monkeypatch, tmp_path):
+    """The timer's run holds no day's data: yesterday and each sweep day run
+    in their own process, so a finished day's memory goes back to the host
+    (AC0G-B4, 2026-11-25: 988 MB held idle beside the sweep child)."""
+    from hamsci_physics import cli
+    from hamsci_physics.grape import spool
+    calls = []
+    monkeypatch.setattr(subprocess, 'run', lambda cmd, **kw: (
+        calls.append((cmd[cmd.index('--date') + 1], kw['env'].get('GRAPE_SWEEP'))),
+        subprocess.CompletedProcess(cmd, 3 if len(calls) == 1 else 0))[1])
+    monkeypatch.setattr(spool, 'day_needs_retry', lambda root, d: True)
+    rc = cli._grape_daily_driver('20261124', tmp_path, tmp_path / 'c.toml')
+    assert rc == 3                                  # yesterday's status, not the sweep's
+    assert calls[0] == ('20261124', '1')
+    assert len(calls) == 7 and all(g == '1' for _d, g in calls)
+

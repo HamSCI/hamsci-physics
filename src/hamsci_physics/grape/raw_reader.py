@@ -85,6 +85,11 @@ class RawBinaryReader:
         self._chunk_index_cache: Dict[Path, Dict[int, Tuple[str, int]]] = {}
         # {day_dir: {chunk_ts: [(segment, file_stem), ...]}}, from the same scan.
         self._segment_cache: Dict[Path, Dict[int, List[Tuple[int, str]]]] = {}
+        # The last chunk read, joined: (chunk_ts, samples, meta).  A chunk
+        # holds ten minutes and the pipeline reads them in order, so without
+        # this every chunk was decompressed ten times, once per minute (AC0G-B4:
+        # 55 min per channel-day).  One chunk only: 115 MB at 24 kHz.
+        self._last_chunk: Optional[Tuple[int, Optional[np.ndarray], Optional[Dict]]] = None
 
         logger.debug(f"RawBinaryReader initialized for {channel_name}, "
                      f"search dirs: {[str(d) for d in self._search_dirs]}")
@@ -284,7 +289,7 @@ class RawBinaryReader:
                     continue
 
                 stem, offset_sec = entry
-                chunk_samples, chunk_meta = self._read_joined(
+                chunk_samples, chunk_meta = self._read_chunk(
                     int(stem.split('.seg')[0]), candidate_dates)
                 if chunk_samples is None:
                     # Index pointed at a file we couldn't actually read
@@ -324,6 +329,18 @@ class RawBinaryReader:
             f"no chunk covering minute {minute_timestamp} for {self.channel_name}"
         )
         return None, None
+
+    def _read_chunk(self, chunk_ts: int, candidate_dates: List[str]
+                    ) -> Tuple[Optional[np.ndarray], Optional[Dict]]:
+        """``_read_joined``, remembering the last chunk read.  Callers slice
+        and copy; nothing may write into the returned array."""
+        if self._last_chunk is not None and self._last_chunk[0] == chunk_ts:
+            return self._last_chunk[1], self._last_chunk[2]
+        self._last_chunk = None          # drop the old chunk before decoding the next
+        samples, meta = self._read_joined(chunk_ts, candidate_dates)
+        if samples is not None:
+            self._last_chunk = (chunk_ts, samples, meta)
+        return samples, meta
 
     def _read_joined(self, chunk_ts: int, candidate_dates: List[str]
                      ) -> Tuple[Optional[np.ndarray], Optional[Dict]]:

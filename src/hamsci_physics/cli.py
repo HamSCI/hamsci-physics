@@ -114,8 +114,10 @@ def _station_identity(config, config_path) -> tuple:
             str(station['grid_square']).strip())
 
 
-def _grape_sweep_retry(day: str, data_root, config_path) -> None:
-    """Re-invoke this CLI for one backfill day.  Never fatal.
+def _grape_sweep_retry(day: str, data_root, config_path, debug: bool = False) -> int:
+    """Run the daily pipeline for one day in a child process.  Never fatal.
+
+    Returns the child's exit status, or 1 when it could not start.
 
     Spawns ``sys.executable -m hamsci_physics.cli`` rather than ``sys.argv[0]``:
     grape-daily.service runs the CLI as ``python3 -m hamsci_physics.cli``, so
@@ -132,13 +134,47 @@ def _grape_sweep_retry(day: str, data_root, config_path) -> None:
            '--date', day,
            '--data-root', str(data_root),
            '--config', str(config_path)]
+    if debug:
+        cmd.append('--debug')
     try:
-        subprocess.run(cmd, env=dict(os.environ, GRAPE_SWEEP='1'),
-                       check=False)
+        return subprocess.run(cmd, env=dict(os.environ, GRAPE_SWEEP='1'),
+                              check=False).returncode
     except OSError as exc:
         # Honour the documented contract: per-day failures are non-fatal.
         print(f"   \u26a0\ufe0f  sweep for {day} could not start: {exc!r} "
               f"(continuing)")
+        return 1
+
+
+def _grape_daily_driver(yesterday: str, data_root, config_path,
+                        debug: bool = False) -> int:
+    """The timer's run: yesterday, then the catch-up sweep, each day in its
+    own child process.  Returns yesterday's exit status.
+
+    A day's run ends by exiting, so its memory goes back to the host before
+    the next day starts.  On AC0G-B4, 2026-11-25, the run for yesterday sat
+    idle at 988 MB while its sweep child decimated an older day; with the
+    station's own 6.8 GB that ran the 9.6 GB VM out of memory, and the kernel
+    killed the timing recorder first.  This process holds no day's data.
+
+    The sweep (2026-08-05): the timer only ever processed "yesterday", so a
+    failed or skipped night became a permanent portal hole (AC0G-B4 lost
+    20260730 entirely and 20260803 to a package crash).  Retry any of the
+    previous 7 days that spool.day_needs_retry finds unpackaged with source
+    data.  GRAPE_SWEEP=1 in each child stops it sweeping again; failures are
+    per-day and non-fatal.  The sweep now runs even when yesterday fails."""
+    from datetime import datetime, timedelta, timezone
+    from .grape.spool import day_needs_retry
+    data_root = Path(data_root)
+    rc = _grape_sweep_retry(yesterday, data_root, config_path, debug)
+    today = datetime.now(tz=timezone.utc).date()
+    for back in range(2, 8):   # yesterday was handled above
+        d = (today - timedelta(days=back)).strftime('%Y%m%d')
+        if not day_needs_retry(data_root, d):
+            continue
+        print(f"\n\U0001f501 sweep: retrying incomplete day {d}", flush=True)
+        _grape_sweep_retry(d, data_root, config_path, debug)
+    return rc
 
 
 def _grape_daily_summary(upload_attempted: bool, upload_ok: bool,
@@ -330,6 +366,10 @@ def main():
             return date_arg.replace('-', '')
         
         if args.grape_command == 'daily':
+            import os
+            if not os.environ.get('GRAPE_SWEEP') and not args.date:
+                sys.exit(_grape_daily_driver(resolve_date(None), data_root,
+                                             Path(args.config), args.debug))
             from .grape.decimation_pipeline import DecimationPipeline
             from .grape.spectrogram import CarrierSpectrogramGenerator
             from .grape.packager import DailyDRFPackager, StationConfig, STANDARD_CHANNELS
@@ -585,10 +625,9 @@ def main():
             print(f"   {len(spectrograms)} spectrograms generated")
             # Reporting must not be able to discard a completed run. The
             # NameError this replaced killed the process here, after every
-            # stage had succeeded and state was saved -- which also made the
-            # catch-up sweep below unreachable. Surface a formatting failure
-            # loudly, then carry on; the work is already done and the sweep
-            # still needs to run.
+            # stage had succeeded and state was saved, and turned a good
+            # day into a failed one. Surface a formatting failure loudly,
+            # then carry on; the work is already done.
             try:
                 for line in _grape_daily_summary(upload_attempted, upload_ok,
                                                  pipeline_status):
@@ -596,26 +635,6 @@ def main():
             except Exception as exc:                      # pragma: no cover
                 print(f"   \u26a0\ufe0f  could not format the upload summary: "
                       f"{exc!r} (pipeline itself completed)")
-
-            # ── catch-up sweep (2026-08-05) ──────────────────────────────
-            # The timer only ever processed "yesterday", so a failed or
-            # skipped night became a permanent portal hole (AC0G-B4 lost
-            # 20260730 entirely and 20260803 to a package crash). After
-            # the normal run, retry any of the previous 7 days that
-            # spool.day_needs_retry finds unpackaged with source data, by
-            # re-invoking this same pipeline per day. GRAPE_SWEEP guards
-            # against recursion; failures are per-day and non-fatal.
-            if not os.environ.get('GRAPE_SWEEP') and not args.date:
-                import subprocess
-                from datetime import timedelta
-                today = datetime.now(tz=timezone.utc).date()
-                for back in range(2, 8):   # yesterday was handled above
-                    d = (today - timedelta(days=back)).strftime('%Y%m%d')
-                    from .grape.spool import day_needs_retry
-                    if not day_needs_retry(data_root, d):
-                        continue
-                    print(f"\n🔁 sweep: retrying incomplete day {d}")
-                    _grape_sweep_retry(d, data_root, config_path)
 
         elif args.grape_command == 'decimate':
             from .grape.decimation_pipeline import DecimationPipeline
