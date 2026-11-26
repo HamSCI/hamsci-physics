@@ -120,9 +120,10 @@ def expire_target(data_root: Path, target: str, days: int, max_seconds: int,
 
 
 def add_expire_verb(subparsers) -> None:
-    """Wire `storage expire`.  Without the kit the verb still exists and exits 2."""
+    """Wire `storage expire`.  Without the kit, or with a sigmond older than its
+    expire verb, the verb still exists and exits 2."""
     kit = load_kit()
-    if kit is not None:
+    if kit is not None and hasattr(kit, "add_expire_verb"):
         kit.add_expire_verb(
             subparsers,
             expire=lambda target, days, max_seconds: expire_target(

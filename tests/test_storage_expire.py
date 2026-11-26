@@ -147,3 +147,14 @@ def test_verb_without_kit_exits_2(monkeypatch, capsys):
     args = parser.parse_args(["storage", "expire", "--target", "timestd.L3_dtec",
                               "--days", "30"])
     assert args.func(args) == 2
+
+
+def test_verb_with_older_kit_exits_2(monkeypatch):
+    """A sigmond from before the expire verb must not break the whole CLI."""
+    import types
+    from hamsci_physics import cli
+    monkeypatch.setattr(storage_expire, "load_kit", lambda: types.SimpleNamespace())
+    parser = cli.build_parser()
+    args = parser.parse_args(["storage", "expire", "--target", "timestd.L3_dtec",
+                              "--days", "30"])
+    assert args.func(args) == 2
