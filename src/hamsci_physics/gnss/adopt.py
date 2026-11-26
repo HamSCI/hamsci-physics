@@ -82,7 +82,10 @@ def adopt_vtec(src_config: Path, dst: Path, now: datetime) -> str:
     """Write ``dst`` from ``src_config``'s ``[gnss_vtec]`` table.
 
     Returns ``"kept"`` when ``dst`` already exists (an operator's file is
-    never overwritten), ``"refused"`` when the source is a symlink or not a regular file,
+    never overwritten), ``"refused"`` when the source is a symlink or not a
+    regular file, or when a wired section cannot be copied as text whole
+    (a header the scan does not match, or a copy that does not read back
+    as the source's table),
     ``"none"`` when there is nothing to adopt (no
     source, no table, ``enabled`` not ``true``, or neither a real host nor
     a device), and ``"written"`` otherwise.
@@ -108,9 +111,12 @@ def adopt_vtec(src_config: Path, dst: Path, now: datetime) -> str:
         return "none"
     if not (_filled_in(section.get("host")) or _filled_in(section.get("device"))):
         return "none"
+    # From here the section is wired: the old unit stops once this returns
+    # anything but "refused", so a table the text scan cannot copy whole
+    # refuses (exit 1) and the station keeps timestd-vtec running.
     table = extract_table(text, "gnss_vtec")
-    if table is None:          # tomllib saw it as a dotted key or inline table
-        return "none"
+    if table is None:          # a header spelled [ gnss_vtec ] or ["gnss_vtec"]
+        return "refused"
 
     stamp = now.astimezone(timezone.utc).isoformat(timespec="seconds")
     out = [
@@ -127,7 +133,15 @@ def adopt_vtec(src_config: Path, dst: Path, now: datetime) -> str:
         alt = station.get("altitude_m")
         if isinstance(alt, (int, float)) and not isinstance(alt, bool):
             out.append(f"altitude_m = {alt!r}")
-    tmp = _write_atomic(dst, ("\n".join(out) + "\n").encode(), 0o644)
+    composed = "\n".join(out) + "\n"
+    # The scan stops at any line that opens with "[": a [gnss_vtec.sub]
+    # table or a multi-line array of arrays would arrive cut short.
+    try:
+        if tomllib.loads(composed).get("gnss_vtec") != section:
+            return "refused"
+    except tomllib.TOMLDecodeError:
+        return "refused"
+    tmp = _write_atomic(dst, composed.encode(), 0o644)
     try:
         os.replace(tmp, dst)
     except BaseException:

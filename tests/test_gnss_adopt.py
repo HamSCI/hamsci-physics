@@ -101,3 +101,46 @@ def test_placeholder_host_and_placeholder_device_write_nothing(tmp_path):
     src.write_text(SRC.replace('host = "192.0.2.10"',
                                'host = "<YOUR_GNSS_HOST>"\ndevice = "<YOUR_GNSS_DEVICE>"'))
     assert adopt_vtec(src, dst, NOW) == "none" and not dst.exists()
+
+# I2 (v3.96 final review): a wired [gnss_vtec] that the text scan cannot copy
+# whole must refuse (exit 1, old unit left running), never read as "none".
+import pytest
+
+@pytest.mark.parametrize("header", ["[ gnss_vtec ]", '["gnss_vtec"]', "['gnss_vtec']"])
+def test_a_header_the_scan_does_not_match_is_refused(tmp_path, header):
+    src, dst = tmp_path / "t.toml", tmp_path / "gnss-vtec.toml"
+    src.write_text(SRC.replace("[gnss_vtec]", header))
+    assert adopt_vtec(src, dst, NOW) == "refused"
+    assert not dst.exists()
+    assert list(tmp_path.iterdir()) == [src]
+
+@pytest.mark.parametrize("extra", [
+    "\n[gnss_vtec.relay]\nport = 9001\n",                       # a subtable the scan cuts
+    'servers = [\n  ["192.0.2.11", 9000],\n  ["192.0.2.12", 9000],\n]\n',  # an array line opens with [
+])
+def test_a_table_the_scan_would_cut_is_refused(tmp_path, extra):
+    src, dst = tmp_path / "t.toml", tmp_path / "gnss-vtec.toml"
+    src.write_text(SRC.replace("save_csv = true\n", "save_csv = true\n" + extra))
+    assert adopt_vtec(src, dst, NOW) == "refused"
+    assert not dst.exists()
+    assert list(tmp_path.iterdir()) == [src]
+
+def test_written_file_reads_back_as_the_source_table(tmp_path):
+    import tomllib
+    for text in (SRC, SRC.replace('host = "192.0.2.10"',
+                                  f'host = "<YOUR_GNSS_HOST>"\ndevice = "{N8UR_DEVICE}"')):
+        src, dst = tmp_path / "t.toml", tmp_path / "gnss-vtec.toml"
+        dst.unlink(missing_ok=True)
+        src.write_text(text)
+        assert adopt_vtec(src, dst, NOW) == "written"
+        assert (tomllib.loads(dst.read_text())["gnss_vtec"]
+                == tomllib.loads(text)["gnss_vtec"])
+
+def test_cli_exits_1_on_an_unmatched_header(tmp_path):
+    from argparse import Namespace
+    from hamsci_physics.cli import _handle_vtec_adopt
+    src = tmp_path / "t.toml"
+    src.write_text(SRC.replace("[gnss_vtec]", "[ gnss_vtec ]"))
+    args = Namespace(from_config=str(src), to=str(tmp_path / "g.toml"),
+                     netrc_from=str(tmp_path / "none"), netrc_to=str(tmp_path / "n"))
+    assert _handle_vtec_adopt(args) == 1
