@@ -23,7 +23,9 @@ SRC_DIR = str(REPO_ROOT / "src")
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from hamsci_physics.grape.decimation_pipeline import _per_minute_gap  # noqa: E402
+import numpy as np  # noqa: E402
+
+from hamsci_physics.grape.decimation_pipeline import _minute_gap_exact, _per_minute_gap  # noqa: E402
 
 
 class PerMinuteGapTests(unittest.TestCase):
@@ -126,6 +128,80 @@ class AggregateInvariantTests(unittest.TestCase):
         new_sum_over_chunk = new_per_minute * 10
         self.assertEqual(old_sum_over_chunk, 10 * chunk_gap)
         self.assertEqual(new_sum_over_chunk, chunk_gap)
+
+
+# --- v3.96: the archive stores fill as zeros and lists it in fill_runs -----
+# Positions are the chunk's: index 0 is the sample at minute_boundary.
+
+def test_exact_count_from_fill_runs():
+    meta = {"minute_boundary": 0, "sample_rate": 100, "samples_written": 60000,
+            "covered_runs": [[0, 60000]], "fill_runs": [[6100, 6300]]}
+    assert _minute_gap_exact(meta, 60) == 200
+    assert _minute_gap_exact(meta, 0) == 0
+
+
+def test_exact_count_includes_holes():
+    meta = {"minute_boundary": 0, "sample_rate": 100, "samples_written": 60000,
+            "covered_runs": [[0, 6000], [6500, 60000]], "fill_runs": []}
+    assert _minute_gap_exact(meta, 60) == 500
+
+
+def test_exact_count_does_not_count_fill_inside_a_hole_twice():
+    meta = {"minute_boundary": 0, "sample_rate": 100, "samples_written": 60000,
+            "covered_runs": [[0, 6000], [6500, 60000]], "fill_runs": [[6400, 6600]]}
+    assert _minute_gap_exact(meta, 60) == 600     # hole 6000-6500, fill on to 6600
+
+
+def test_exact_count_stops_at_the_samples_written():
+    # The second minute runs short: positions past samples_written are the
+    # pipeline's tail padding, counted there, not here.
+    meta = {"minute_boundary": 0, "sample_rate": 100, "samples_written": 9000,
+            "covered_runs": [[0, 9000]], "fill_runs": [[6100, 6200]]}
+    assert _minute_gap_exact(meta, 60) == 100
+
+
+def test_exact_count_none_for_a_legacy_sidecar():
+    assert _minute_gap_exact({"gap_samples": 12000, "file_duration_sec": 600}, 0) is None
+    assert _minute_gap_exact(None, 0) is None
+    # covered_runs without fill_runs: an interpolating writer, no mask.
+    assert _minute_gap_exact({"minute_boundary": 0, "sample_rate": 100,
+                              "covered_runs": [[0, 6000]]}, 0) is None
+
+
+def test_minute_gap_adds_tail_padding_and_fill(tmp_path, monkeypatch):
+    """Padding and fill ADD; the larger alone would hide the fill.
+
+    Plan A's FakeReader at 24 kHz holds minutes 10 and 11 of one two-minute
+    chunk.  Minute 11 runs short by 240 000 raw samples (10 s) and carries
+    24 000 fill zeros (1 s).  The day file stores gap_samples in 10 Hz units
+    (raw // 2400): 264 000 raw -> 110; max() would give 100.
+    """
+    import test_grape_pipeline_alignment as align   # tests/ is on sys.path under pytest
+    from hamsci_physics.grape import decimation_pipeline
+
+    rate, n = align.RATE, align.N
+    short = n - 240_000
+    written = n + short
+    side = {"minute_boundary": align._ts(10), "sample_rate": rate,
+            "samples_written": written, "file_duration_sec": 120,
+            "covered_runs": [[0, written]], "fill_runs": [[n + 24_000, n + 48_000]],
+            "gap_fill": "zeros", "gap_samples": 24_000}
+    align._install_reader(monkeypatch, [10, 11],
+                          signal_of={10: np.ones(n, np.complex64),
+                                     11: np.ones(short, np.complex64)})
+    base = decimation_pipeline.RawBinaryReader
+
+    class MaskedReader(base):
+        def read_minute(self, ts):
+            x, meta = super().read_minute(ts)
+            return x, (None if meta is None else {**meta, **side})
+
+    monkeypatch.setattr(decimation_pipeline, "RawBinaryReader", MaskedReader)
+    _, meta = align._run(tmp_path)
+    m = meta["minutes"]
+    assert m["10"]["gap_samples"] == 0
+    assert m["11"]["gap_samples"] == 110            # (240 000 + 24 000) // 2400
+    assert m["11"]["filter_edge"] is True           # the padding still flags the edge
 
 
 if __name__ == "__main__":

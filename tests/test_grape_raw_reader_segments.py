@@ -22,6 +22,7 @@ if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
 from hamsci_physics.grape.chunk_segments import join_segments, parse_chunk_name  # noqa: E402
+from hamsci_physics.grape.decimation_pipeline import _minute_gap_exact  # noqa: E402
 from hamsci_physics.grape.raw_reader import RawBinaryReader  # noqa: E402
 
 RATE = 100          # small chunks; the reader takes the rate from the sidecar
@@ -105,6 +106,50 @@ def test_copy_matches_hf_timestd():
     np.testing.assert_array_equal(x, [1, 1, 1, 1, 1, 1, 2, 2])
     assert meta["segments"][1]["samples_refused"] == 2
     assert meta["segments"][1]["start_rtp_offset_samples"] == -6
+    a2 = np.ones(10, np.complex64); a2[2:4] = 0
+    b2 = np.full(10, 2, np.complex64); b2[7:9] = 0
+    _, meta2 = join_segments([
+        (1, a2, {"covered_runs": [[0, 6]], "fill_runs": [[2, 4]], "gap_fill": "zeros",
+                 "gap_samples": 2}),
+        (2, b2, {"covered_runs": [[4, 10]], "fill_runs": [[7, 9]], "gap_fill": "zeros",
+                 "gap_samples": 2})])
+    assert meta2["fill_runs"] == [[2, 4], [7, 9]] and meta2["gap_samples"] == 4
+    assert meta2["gap_fill"] == "zeros"
+
+
+def test_reader_returns_the_joined_fill_runs(tmp_path):
+    """Both segments carry a fill mask; the reader hands back the merged mask
+    in the chunk's position frame, and the fill reads as the zeros stored."""
+    first, seg2 = _restart_at(n_first=4 * 60 * RATE, n_gap=30 * RATE)
+    first[2:4] = 0
+    seg2[30100:30300] = 0
+    day = _channel(tmp_path) / DAY
+    _write(day, str(CHUNK), first, minute_boundary=CHUNK, covered_runs=[[0, len(first)]],
+           fill_runs=[[2, 4]], gap_fill="zeros")
+    _write(day, f"{CHUNK}.seg2", seg2, minute_boundary=CHUNK,
+           covered_runs=[[27000, len(seg2)]], fill_runs=[[30100, 30300]], gap_fill="zeros")
+    r = RawBinaryReader(tmp_path, "WWV 10000", hot_buffer_root=tmp_path / "no-hot")
+    x, meta = r.read_minute(CHUNK)
+    assert meta["fill_runs"] == [[2, 4], [30100, 30300]] and meta["gap_fill"] == "zeros"
+    assert np.all(x[2:4] == 0) and np.all(x[4:] == 1)
+    # Each minute counts its own fill and holes, exactly.
+    assert _minute_gap_exact(meta, CHUNK) == 2
+    assert _minute_gap_exact(meta, CHUNK + 240) == 3000      # the restart hole
+    assert _minute_gap_exact(meta, CHUNK + 300) == 200       # segment 2's fill
+    assert _minute_gap_exact(meta, CHUNK + 360) == 0
+
+
+def test_a_legacy_segment_leaves_the_join_without_a_mask(tmp_path):
+    """A segment written before v3.96 marks no fill: the joined chunk claims none."""
+    first, seg2 = _restart_at(n_first=4 * 60 * RATE, n_gap=0)
+    day = _channel(tmp_path) / DAY
+    _write(day, str(CHUNK), first, minute_boundary=CHUNK, covered_runs=[[0, len(first)]])
+    _write(day, f"{CHUNK}.seg2", seg2, minute_boundary=CHUNK,
+           covered_runs=[[24000, len(seg2)]], fill_runs=[], gap_fill="zeros")
+    r = RawBinaryReader(tmp_path, "WWV 10000", hot_buffer_root=tmp_path / "no-hot")
+    _, meta = r.read_minute(CHUNK)
+    assert "fill_runs" not in meta and "gap_fill" not in meta
+    assert _minute_gap_exact(meta, CHUNK) is None
 
 
 def test_a_chunk_is_decoded_once_for_its_ten_minutes(tmp_path, monkeypatch):

@@ -73,6 +73,43 @@ def _per_minute_gap(meta: Optional[dict]) -> int:
     return chunk_gap // chunk_minutes
 
 
+def _minute_gap_exact(meta: Optional[dict], minute_ts: int) -> Optional[int]:
+    """Raw positions of one minute that hold no received sample, or None.
+
+    Since v3.96 the archive writer stores ka9q-python's gap fill as zeros
+    and lists it in the sidecar's ``fill_runs``; ``covered_runs`` lists the
+    positions it wrote at all.  Positions count from the chunk's
+    ``minute_boundary``.  The count takes every position in
+    ``[off, min(off + 60 * rate, samples_written))`` that lies in a fill
+    run or outside every covered run, where
+    ``off = (minute_ts - minute_boundary) * rate``.  Positions past
+    ``samples_written`` belong to the caller's tail padding.
+
+    None when the sidecar lacks ``fill_runs`` or ``covered_runs`` (a chunk
+    written before v3.96, whose fill was interpolated and never marked);
+    the caller then falls back to ``_per_minute_gap``.  ``gap_samples``
+    keeps its own meaning (the gap ka9q-python reported) and plays no part.
+    """
+    if not meta or meta.get('fill_runs') is None or meta.get('covered_runs') is None:
+        return None
+    try:
+        rate = int(meta['sample_rate'])
+        off = (int(minute_ts) - int(meta['minute_boundary'])) * rate
+    except (KeyError, TypeError, ValueError):
+        return None
+    end = off + 60 * rate
+    if meta.get('samples_written') is not None:
+        end = min(end, int(meta['samples_written']))
+    if end <= off:
+        return 0
+    lost = np.ones(end - off, dtype=bool)          # no received sample
+    for a, b in meta['covered_runs']:
+        lost[max(0, int(a) - off):max(0, int(b) - off)] = False
+    for a, b in meta['fill_runs']:
+        lost[max(0, int(a) - off):max(0, int(b) - off)] = True
+    return int(lost.sum())
+
+
 def _neighbour_minute(reader, minute_ts: int, epoch: Optional[str],
                       expected: int) -> Optional[np.ndarray]:
     """One raw minute borrowed from a neighbouring day, or None.
@@ -328,9 +365,16 @@ class DecimationPipeline:
                 continue
             put(y, (minute_index + 1) * SAMPLES_PER_MINUTE)
 
-            # The sidecar's gap_samples is chunk-wide; spread it across the
-            # chunk's minutes (see _per_minute_gap), then convert to 10 Hz.
-            gap_info = max(gap_info, _per_minute_gap(meta))
+            # gap_info holds the tail padding so far.  A v3.96 chunk marks its
+            # fill and holes, so this minute's own count adds to the padding
+            # (they cover different positions).  An older chunk carries only
+            # the chunk-wide gap_samples, spread across its minutes (see
+            # _per_minute_gap).  Then convert to 10 Hz.
+            exact = _minute_gap_exact(meta, minute_ts)
+            if exact is not None:
+                gap_info = gap_info + exact
+            else:
+                gap_info = max(gap_info, _per_minute_gap(meta))
             if decimation_ratio > 0:
                 gap_info = gap_info // decimation_ratio
 
