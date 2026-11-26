@@ -234,6 +234,52 @@ ALIAS_REJECTION_FLOOR_DB = 90.0  # required from 6 Hz to 200 Hz
 DECIMATOR_VERSION = 2  # 2: removes its own group delay (v3.96)
 
 
+class _BlockDecimatingFIR:
+    """
+    An FIR filter that computes only the outputs a decimator keeps.
+
+    Equal to signal.lfilter(taps, [1.0], x) from zero state, keeping output
+    n when n % factor == phase (n counts input samples from the first).
+    lfilter computes every output and the decimator then discards all but
+    one in `factor`; this computes the one.
+
+    The input splits into blocks of `factor` samples, aligned so each block
+    ends on a kept sample.  A kept output is then a sum over the last J
+    blocks, one column of the taps per block: a single matrix product, block
+    rows by J columns, and J shifted adds.  The input carries over between
+    calls, so any split of a stream gives the same outputs.
+    """
+
+    def __init__(self, taps: np.ndarray, factor: int, phase: int):
+        self.factor = factor
+        self.blocks = -(-len(taps) // factor)                  # J
+        padded = np.zeros(self.blocks * factor)
+        padded[:len(taps)] = taps
+        # Column j, row q: the tap that meets row q of the j-th block back
+        self._taps = np.stack([padded[j * factor:(j + 1) * factor][::-1]
+                               for j in range(self.blocks)], axis=1).astype(np.complex128)
+        # Zero history: J - 1 whole blocks, plus the lead that puts each
+        # block's last sample on the phase
+        self._lead = (self.blocks - 1) * factor + (factor - 1 - phase) % factor
+        self.reset()
+
+    def reset(self) -> None:
+        self._held = np.zeros(self._lead, dtype=np.complex128)
+
+    def __call__(self, x: np.ndarray) -> np.ndarray:
+        held = np.concatenate([self._held, x])
+        n, J = len(held) // self.factor, self.blocks
+        if n < J:
+            self._held = held
+            return np.array([], dtype=np.complex128)
+        z = held[:n * self.factor].reshape(n, self.factor) @ self._taps
+        y = z[J - 1:, 0].copy()
+        for j in range(1, J):
+            y += z[J - 1 - j:n - j, j]
+        self._held = held[(n - J + 1) * self.factor:]
+        return y
+
+
 def _design_cic_filter(decimation_factor: int, order: int = 4) -> dict:
     """
     Design CIC (Cascaded Integrator-Comb) filter parameters.
@@ -567,6 +613,15 @@ class StatefulDecimator:
         self.final_phase = (D // R) % FINAL_FIR_DECIMATION
         self.latency_outputs = D // self.input_per_output       # 31 at 24 kHz
 
+        # The N boxcars make one FIR of N(R-1)+1 taps.  It and the final
+        # FIR compute only the samples their decimation keeps.
+        boxcars = self.cic_b
+        for _ in range(self.cic_order - 1):
+            boxcars = np.convolve(boxcars, self.cic_b)
+        self._cic = _BlockDecimatingFIR(boxcars, R, self.cic_phase)
+        self._final = _BlockDecimatingFIR(self.final_taps, FINAL_FIR_DECIMATION,
+                                          self.final_phase)
+
         # Initialize filter states
         self.reset()
 
@@ -575,19 +630,11 @@ class StatefulDecimator:
 
     def reset(self):
         """Reset all filter states and counters (call at session/channel boundaries)."""
-        # CIC: N cascaded stages, each needs state
-        self.cic_zi = [signal.lfilter_zi(self.cic_b, self.cic_a) * 0
-                      for _ in range(self.cic_order)]
-
-        # Compensation FIR state
-        self.comp_zi = signal.lfilter_zi(self.comp_taps, [1.0]) * 0
-
-        # Final FIR state
-        self.final_zi = signal.lfilter_zi(self.final_taps, [1.0]) * 0
-
-        # Absolute counters for decimation phase alignment
-        self.cic_sample_count = 0
-        self.final_sample_count = 0
+        # Zero state.  (lfilter_zi(...) * 0 solved a 2,426-square system
+        # to get zeros: 0.2 s per stream.)
+        self._cic.reset()
+        self.comp_zi = np.zeros(len(self.comp_taps) - 1, dtype=np.complex128)
+        self._final.reset()
 
         # Outputs still to drop: the latency, plus any primed outputs
         self.primed_outputs = 0
@@ -601,16 +648,8 @@ class StatefulDecimator:
 
     def _filter(self, iq_samples: np.ndarray) -> np.ndarray:
         """Run the cascade; return every new absolute output, before any discard."""
-        R = self.cic_params['decimation_factor']
-
-        # STAGE 1: CIC filter with state, decimate on phase q
-        filtered = iq_samples
-        for i in range(self.cic_order):
-            filtered, self.cic_zi[i] = signal.lfilter(
-                self.cic_b, self.cic_a, filtered, zi=self.cic_zi[i])
-        start = (self.cic_phase - self.cic_sample_count) % R
-        self.cic_sample_count += len(filtered)
-        iq_400hz = filtered[start::R]
+        # STAGE 1: the boxcars, decimate on phase q
+        iq_400hz = self._cic(iq_samples)
         if len(iq_400hz) == 0:
             return np.array([], dtype=np.complex64)
 
@@ -618,12 +657,8 @@ class StatefulDecimator:
         iq_400hz_flat, self.comp_zi = signal.lfilter(
             self.comp_taps, [1.0], iq_400hz, zi=self.comp_zi)
 
-        # STAGE 3: Final FIR with state, decimate by 40 on phase p
-        iq_filtered, self.final_zi = signal.lfilter(
-            self.final_taps, [1.0], iq_400hz_flat, zi=self.final_zi)
-        start = (self.final_phase - self.final_sample_count) % FINAL_FIR_DECIMATION
-        self.final_sample_count += len(iq_filtered)
-        return iq_filtered[start::FINAL_FIR_DECIMATION].astype(np.complex64)
+        # STAGE 3: Final FIR, decimate by 40 on phase p
+        return self._final(iq_400hz_flat).astype(np.complex64)
 
     def _discard(self, out: np.ndarray) -> np.ndarray:
         """Drop outputs still owed to the latency and the primed history."""

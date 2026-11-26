@@ -390,7 +390,6 @@ class DecimationPipeline:
             edge_start = False
             padded_last = bool(padded_now)
             last_good = minute_index
-            gc.collect()
 
         if stream is not None:
             ahead = (_neighbour_minute(reader, day_start_ts + 1440 * 60, epoch, expected_raw_samples)
