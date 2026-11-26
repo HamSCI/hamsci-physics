@@ -383,6 +383,9 @@ def build_parser() -> argparse.ArgumentParser:
     tg.add_argument('--history-db', type=str, default='/var/lib/timestd/authority_history.db')
     tg.add_argument('--json', action='store_true')
 
+    from .storage_expire import add_expire_verb
+    add_expire_verb(subparsers)
+
     vtec_parser = subparsers.add_parser('vtec', help='GNSS VTEC service')
     vtec_sub = vtec_parser.add_subparsers(dest='vtec_command', help='VTEC command')
     adopt = vtec_sub.add_parser(
@@ -424,6 +427,11 @@ def main():
         sys.exit(_handle_inventory(args))
     elif args.command == 'validate':
         sys.exit(_handle_validate(args))
+    elif args.command == 'storage':
+        func = getattr(args, 'func', None)
+        if func is None:
+            parser.parse_args(['storage', '--help'])
+        sys.exit(func(args))
     elif args.command == 'vtec':
         if args.vtec_command == 'adopt':
             sys.exit(_handle_vtec_adopt(args))

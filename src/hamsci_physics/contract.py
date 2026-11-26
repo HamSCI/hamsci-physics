@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from hamsci_physics.version import GIT_INFO
+from hamsci_physics.storage_expire import DAYS
 
 CONTRACT_VERSION = "0.8"
 
@@ -80,25 +81,21 @@ def _data_sinks(config: dict, data_root: Path) -> list[dict[str, Any]]:
     for ``[disk_budget]``, measured on AC0G-B4.
     """
     db = "timestd"
+    # (table, mb_per_day), in sink order; days come from storage_expire.DAYS.
+    volumes = [("L3_dtec", 40), ("L3_dtec_diff", 10), ("L3_dtec_timeseries", 10),
+               ("L3_tec", 5), ("L3_tid", 1), ("L3C_propagation_stats", 1),
+               ("L3_physics", 1)]
     sinks: list[dict[str, Any]] = [
-        {"kind": "service", "target": f"{db}.L3_dtec",
-         "schema_ref": f"{db}:1", "retention_days": 365, "mb_per_day": 40},
-        {"kind": "service", "target": f"{db}.L3_dtec_diff",
-         "schema_ref": f"{db}:1", "retention_days": 365, "mb_per_day": 10},
-        {"kind": "service", "target": f"{db}.L3_dtec_timeseries",
-         "schema_ref": f"{db}:1", "retention_days": 365, "mb_per_day": 10},
-        {"kind": "service", "target": f"{db}.L3_tec",
-         "schema_ref": f"{db}:1", "retention_days": 365, "mb_per_day": 5},
-        {"kind": "service", "target": f"{db}.L3_tid",
-         "schema_ref": f"{db}:1", "retention_days": 365, "mb_per_day": 1},
-        {"kind": "service", "target": f"{db}.L3C_propagation_stats",
-         "schema_ref": f"{db}:1", "retention_days": 365, "mb_per_day": 1},
-    ]
+        {"kind": "service", "target": f"{db}.{table}",
+         "schema_ref": f"{db}:1", "retention_days": DAYS[table],
+         "mb_per_day": mb, "expires": True}
+        for table, mb in volumes]
     if _gnss_vtec_enabled():
         # hamsci-physics-vtec.service: one row per VTEC epoch.
         sinks.append({"kind": "service", "target": f"{db}.L3_gnss_vtec",
-                      "schema_ref": f"{db}:1", "retention_days": 30,
-                      "mb_per_day": 5})
+                      "schema_ref": f"{db}:1",
+                      "retention_days": DAYS["L3_gnss_vtec"],
+                      "mb_per_day": 5, "expires": True})
     if (config.get("grape", {}) or {}).get("enabled", True):
         sinks.append({
             "kind": "file",
